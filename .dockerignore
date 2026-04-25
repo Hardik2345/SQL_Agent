@@ -1,0 +1,15 @@
+node_modules
+npm-debug.log*
+.env
+.env.local
+.git
+.gitignore
+.vscode
+.idea
+coverage
+dist
+build
+tests
+*.md
+!README.md
+file_structure.txt

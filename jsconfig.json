@@ -1,0 +1,22 @@
+{
+  "compilerOptions": {
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "target": "ES2022",
+    "lib": ["ES2022"],
+    "checkJs": true,
+    "allowJs": true,
+    "noEmit": true,
+    "resolveJsonModule": true,
+    "strict": false,
+    "skipLibCheck": true,
+    "maxNodeModuleJsDepth": 0,
+    "types": ["node"]
+  },
+  "include": [
+    "apps/api/src/**/*.js",
+    "shared/**/*.js",
+    "tests/**/*.js"
+  ],
+  "exclude": ["node_modules", "dist", "build"]
+}

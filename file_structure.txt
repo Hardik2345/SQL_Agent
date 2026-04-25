@@ -1,0 +1,100 @@
+sql-agent/
+│
+├── apps/
+│   └── api/
+│       ├── src/
+│       │   ├── controllers/
+│       │   │   └── insight.controller.js
+│       │   │
+│       │   ├── routes/
+│       │   │   └── insight.routes.js
+│       │   │
+│       │   ├── middleware/
+│       │   │   └── tenantContext.middleware.js
+│       │   │
+│       │   ├── orchestrator/
+│       │   │   ├── graph.js
+│       │   │   ├── state.js
+│       │   │   └── nodes/
+│       │   │       ├── plan.node.js
+│       │   │       ├── sql.node.js
+│       │   │       ├── validate.node.js
+│       │   │       └── execute.node.js
+│       │   │
+│       │   ├── modules/
+│       │   │   ├── validation/
+│       │   │   │   ├── validator.js
+│       │   │   │   ├── rules/
+│       │   │   │   │   ├── syntax.rule.js
+│       │   │   │   │   ├── safety.rule.js
+│       │   │   │   │   ├── schema.rule.js
+│       │   │   │   │   └── cost.rule.js
+│       │   │   │   └── validation.types.js
+│       │   │   │
+│       │   │   ├── execution/
+│       │   │   │   ├── executor.js
+│       │   │   │   ├── poolManager.js
+│       │   │   │   └── execution.types.js
+│       │   │   │
+│       │   │   ├── tenant/
+│       │   │   │   ├── tenantClient.js
+│       │   │   │   └── tenant.types.js
+│       │   │   │
+│       │   │   └── contracts/
+│       │   │       ├── queryRequest.js
+│       │   │       ├── queryPlan.js
+│       │   │       ├── sqlDraft.js
+│       │   │       ├── validationResult.js
+│       │   │       ├── executionResult.js
+│       │   │       └── agentState.js
+│       │   │
+│       │   ├── lib/
+│       │   │   ├── llm.js
+│       │   │   ├── parser.js
+│       │   │   └── runtimeValidators.js
+│       │   │
+│       │   ├── utils/
+│       │   │   ├── logger.js
+│       │   │   ├── errors.js
+│       │   │   ├── constants.js
+│       │   │   └── helpers.js
+│       │   │
+│       │   ├── config/
+│       │   │   ├── env.js
+│       │   │   └── models.js
+│       │   │
+│       │   ├── app.js
+│       │   └── server.js
+│       │
+│       └── package.json
+│
+├── shared/
+│   ├── db/
+│   │   └── mysql.types.js
+│   └── types/
+│       └── common.types.js
+│
+├── prompts/
+│   ├── planner.prompt.md
+│   ├── sql.prompt.md
+│   └── correction.prompt.md
+│
+├── agent-context/
+│   └── system-context.md
+│
+├── schema/
+│   └── schema.sql
+│
+├── tests/
+│   ├── validation/
+│   │   └── validator.test.js
+│   ├── execution/
+│   │   └── executor.test.js
+│   └── orchestrator/
+│       └── graph.test.js
+│
+├── .env
+├── .gitignore
+├── jsconfig.json
+├── package.json
+└── README.md
