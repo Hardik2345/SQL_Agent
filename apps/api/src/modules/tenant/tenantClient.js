@@ -11,6 +11,7 @@ import {
   assertTenantResolveResponse,
   normalizeTenantResponse,
 } from './tenant.types.js';
+import { decryptTenantPassword } from './passwordCrypto.js';
 
 /**
  * @typedef {import('./tenant.types.js').TenantExecutionContext} TenantExecutionContext
@@ -162,7 +163,14 @@ export const createTenantClient = (options = {}) => {
     let normalized;
     try {
       const validated = assertTenantResolveResponse(payload);
-      normalized = normalizeTenantResponse(validated);
+      const decrypted = decryptTenantPassword(
+        validated.password,
+        env.tenantRouter.passwordAesKey,
+      );
+      normalized = normalizeTenantResponse({
+        ...validated,
+        password: decrypted.password,
+      });
     } catch (err) {
       logger.error(
         { event: 'tenant.resolve.invalid_payload', brandId, elapsedMs, err },

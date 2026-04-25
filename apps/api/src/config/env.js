@@ -28,6 +28,9 @@ export const env = Object.freeze({
     // tenant-router accepts x-pipeline-key as its internal-bypass header
     // for /tenant/resolve, mirroring the gateway's bypass rule.
     apiKey: process.env.X_PIPELINE_KEY ?? process.env.TENANT_ROUTER_API_KEY ?? '',
+    // AES-256-CBC key used to decrypt tenant-router password payloads shaped
+    // as `base64(iv):base64(ciphertext)`. Matches the dashboard decrypt logic.
+    passwordAesKey: process.env.PASSWORD_AES_KEY ?? '',
   }),
 
   gateway: Object.freeze({

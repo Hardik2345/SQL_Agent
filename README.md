@@ -199,6 +199,7 @@ Important variables:
 | `PORT` | API port, default `4000`. |
 | `TENANT_ROUTER_URL` | Base URL for tenant-router, required. |
 | `TENANT_ROUTER_TIMEOUT_MS` | Tenant-router timeout. |
+| `PASSWORD_AES_KEY` | AES key used to decrypt tenant-router DB password payloads shaped as `base64(iv):base64(ciphertext)`. |
 | `X_PIPELINE_KEY` / `TENANT_ROUTER_API_KEY` | Optional tenant-router bypass key. |
 | `GATEWAY_SHARED_SECRET` | Enables gateway HMAC verification when set. |
 | `GATEWAY_TRUST_BYPASS` | Dev-only direct `x-brand-id` trust when no shared secret is set. |
