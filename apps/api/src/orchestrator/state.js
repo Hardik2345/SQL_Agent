@@ -21,10 +21,16 @@ export const stateChannels = Object.freeze({
   schemaContext: { value: keepIfDefined },
   globalContext: { value: keepIfDefined },
   chatContext: { value: keepIfDefined },
+  retrievalContext: { value: keepIfDefined },
   plan: { value: keepIfDefined },
   sqlDraft: { value: keepIfDefined },
   validation: { value: keepIfDefined },
   execution: { value: keepIfDefined },
+  // Phase 2C: bounded correction loop. The correction node manages
+  // its own accumulation (reads previous, writes the merged value),
+  // so last-write-wins is sufficient.
+  correctionAttempts: { value: lastWriteWins, default: () => 0 },
+  correctionHistory: { value: lastWriteWins, default: () => [] },
   status: { value: lastWriteWins, default: () => AGENT_STATUS.PENDING },
   error: { value: keepIfDefined },
 });

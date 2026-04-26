@@ -212,6 +212,8 @@ const llmPlan = async ({ plannerCtx, llm, correlationId }) => {
 const orchestrationStatusFor = (plan) =>
   plan.status === 'needs_clarification'
     ? AGENT_STATUS.CLARIFICATION_REQUIRED
+    : plan.status === 'memory_update'
+      ? AGENT_STATUS.MEMORY_UPDATE_REQUIRED
     : AGENT_STATUS.PLANNED;
 
 /**
@@ -285,6 +287,8 @@ export const createPlanNode = (options = {}) => {
       },
       plan.status === 'needs_clarification'
         ? 'planner asked for clarification'
+        : plan.status === 'memory_update'
+          ? 'planner produced memory update'
         : 'planner produced ready plan',
     );
 

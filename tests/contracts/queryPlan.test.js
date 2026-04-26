@@ -62,6 +62,31 @@ describe('QueryPlan contract — Phase 2B widening', () => {
     assert.match(plan.clarificationQuestion, /cancelled/i);
   });
 
+  it('accepts status="memory_update" with confirmed metric definitions', () => {
+    const plan = assertQueryPlan({
+      intent: 'chat_metric_definition',
+      targetTables: [],
+      requiredMetrics: [],
+      filters: [],
+      notes: 'store chat-scoped metric definition',
+      status: 'memory_update',
+      clarificationQuestion: null,
+      assumptions: [],
+      metricDefinitions: [],
+      memoryUpdates: {
+        confirmedMetricDefinitions: {
+          contribution_margin: 'net sales - discounts',
+        },
+      },
+    });
+
+    assert.equal(plan.status, 'memory_update');
+    assert.equal(
+      plan.memoryUpdates.confirmedMetricDefinitions.contribution_margin,
+      'net sales - discounts',
+    );
+  });
+
   it('rejects status="ready" with empty targetTables (cross-rule)', () => {
     assert.throws(
       () =>
@@ -84,6 +109,22 @@ describe('QueryPlan contract — Phase 2B widening', () => {
           requiredMetrics: ['x'],
           status: 'needs_clarification',
           clarificationQuestion: null,
+        }),
+      (err) => err instanceof ContractError,
+    );
+  });
+
+  it('rejects status="memory_update" without confirmed metric definitions', () => {
+    assert.throws(
+      () =>
+        assertQueryPlan({
+          intent: 'chat_metric_definition',
+          targetTables: [],
+          requiredMetrics: [],
+          status: 'memory_update',
+          clarificationQuestion: null,
+          assumptions: [],
+          metricDefinitions: [],
         }),
       (err) => err instanceof ContractError,
     );

@@ -1,4 +1,5 @@
 import 'dotenv/config';
+import { MAX_CORRECTION_ATTEMPTS_DEFAULT } from '../utils/constants.js';
 
 const required = (name, value) => {
   if (value === undefined || value === null || value === '') {
@@ -68,6 +69,56 @@ export const env = Object.freeze({
     // "llm" enables the LLM-backed SQL generator. Anything else
     // (unset, typo, "true", …) falls back to the deterministic mock.
     mode: process.env.SQL_MODE === 'llm' ? 'llm' : 'mock',
+  }),
+
+  observability: Object.freeze({
+    // Dev-only escape hatch for inspecting generated SQL. The call sites
+    // also require NODE_ENV !== "production" before logging SQL text.
+    logGeneratedSql: toBool(process.env.DEV_LOG_GENERATED_SQL, false),
+  }),
+
+  correction: Object.freeze({
+    // Same fail-safe pattern as PLANNER_MODE / SQL_MODE.
+    mode: process.env.CORRECTION_MODE === 'llm' ? 'llm' : 'mock',
+    // Cap on automated correction retries. Higher values cost LLM
+    // tokens and rarely converge — the default (2) is intentionally
+    // tight. Floor at 0 (correction disabled when set to 0).
+    maxAttempts: (() => {
+      const parsed = Number.parseInt(
+        process.env.MAX_CORRECTION_ATTEMPTS ?? '',
+        10,
+      );
+      if (!Number.isFinite(parsed) || parsed < 0) {
+        return MAX_CORRECTION_ATTEMPTS_DEFAULT;
+      }
+      return parsed;
+    })(),
+  }),
+
+  // Phase 2D: external services for the context loader. ALL OPTIONAL
+  // — when an URL is unset, the corresponding provider falls back to
+  // an in-memory stub so the system still runs (with reduced
+  // intelligence). Tests rely on the in-memory paths.
+  redis: Object.freeze({
+    url: process.env.REDIS_URL ?? '',
+    chatTtlSeconds: toInt(process.env.CHAT_MEMORY_TTL_SECONDS, 24 * 60 * 60),
+  }),
+  mongo: Object.freeze({
+    uri: process.env.MONGO_URI ?? '',
+    db: process.env.MONGO_DB ?? 'sql_agent',
+    metricsCollection: process.env.MONGO_METRICS_COLLECTION ?? 'metrics',
+  }),
+  qdrant: Object.freeze({
+    url: process.env.QDRANT_URL ?? '',
+    apiKey: process.env.QDRANT_API_KEY ?? '',
+    collection: process.env.QDRANT_COLLECTION ?? 'semantic_metrics',
+  }),
+  embedding: Object.freeze({
+    model: process.env.EMBEDDING_MODEL ?? 'text-embedding-3-small',
+    dimensions: toInt(process.env.EMBEDDING_DIMENSIONS, 1536),
+  }),
+  retrieval: Object.freeze({
+    topK: toInt(process.env.VECTOR_TOP_K, 5),
   }),
 });
 

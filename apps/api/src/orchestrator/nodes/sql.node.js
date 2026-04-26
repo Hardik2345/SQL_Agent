@@ -243,12 +243,12 @@ export const createSqlNode = (options = {}) => {
     }
 
     // Defensive: the conditional graph edge after the planner is
-    // supposed to short-circuit needs_clarification plans to END
+    // supposed to short-circuit non-ready plans to END
     // before this node runs. If we somehow got here anyway, fail
     // loudly rather than producing SQL the user never confirmed.
-    if (plan.status === 'needs_clarification') {
+    if (plan.status !== 'ready') {
       throw new ContractError(
-        'sqlNode reached with plan.status="needs_clarification" — graph routing failed',
+        `sqlNode reached with plan.status="${plan.status}" — graph routing failed`,
         { intent: plan.intent, requiredMetrics: plan.requiredMetrics },
       );
     }
@@ -289,6 +289,19 @@ export const createSqlNode = (options = {}) => {
       },
       'sql generator produced draft',
     );
+
+    if (env.observability.logGeneratedSql && env.nodeEnv !== 'production') {
+      logger.warn(
+        {
+          event: 'node.sql.generated_debug',
+          correlationId,
+          mode,
+          tables: draft.tables,
+          sql: draft.sql,
+        },
+        'DEV DEBUG: sql generator produced SQL',
+      );
+    }
 
     return { sqlDraft: draft, status: AGENT_STATUS.SQL_DRAFTED };
   };

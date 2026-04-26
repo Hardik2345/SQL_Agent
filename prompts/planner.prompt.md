@@ -34,13 +34,13 @@ be `}`.
 
 ```json
 {
-  "intent": "string — short classification, e.g. 'metric_over_time', 'top_n', 'comparison', 'metric_calculation', 'unanswerable'",
+  "intent": "string — short classification, e.g. 'metric_over_time', 'top_n', 'comparison', 'metric_calculation', 'chat_metric_definition', 'unanswerable'",
   "targetTables": ["table_name", "..."],
   "requiredMetrics": ["metric_name", "..."],
   "filters": ["optional plain-language filter hint", "..."],
   "timeGrain": "day|week|month|quarter|year",
   "notes": "optional planner rationale + ambiguity notes (max 4000 chars)",
-  "status": "ready" | "needs_clarification",
+  "status": "ready" | "needs_clarification" | "memory_update",
   "clarificationQuestion": "string when status='needs_clarification', otherwise null",
   "assumptions": ["only when grounded in provided context"],
   "metricDefinitions": [
@@ -50,7 +50,12 @@ be `}`.
       "description": "short description",
       "source": "global_context" | "chat_context" | "planner_assumption"
     }
-  ]
+  ],
+  "memoryUpdates": {
+    "confirmedMetricDefinitions": {
+      "metric_name": "formula text"
+    }
+  }
 }
 ```
 
@@ -87,6 +92,9 @@ be `}`.
    `MetricDefinition` entry (with `source` set correctly) in
    `metricDefinitions`. This lets downstream nodes audit which
    formulas a query uses.
+8. **Separate memory updates from queries.** If the user is defining or
+   correcting a metric for this chat/conversation rather than asking for
+   data, return `status: "memory_update"` and do not choose tables.
 
 ## When to return `"needs_clarification"`
 
@@ -116,6 +124,33 @@ When returning `"needs_clarification"`:
 - `assumptions` and `metricDefinitions` should be empty unless the
   question is partly answerable.
 
+## When to return `"memory_update"`
+
+Return `status: "memory_update"` when the user explicitly asks you to
+remember, define, or use a metric definition for this chat/conversation
+and does NOT ask for analytics results in the same message.
+
+Examples:
+
+- "In this chat, contribution margin means net sales - discounts."
+- "For this conversation, AOV means gross sales / orders."
+- "Remember that net revenue equals net sales - returns."
+- "From now on, sell-through rate is units sold / units received."
+
+For `memory_update`:
+
+- Set `intent` to `"chat_metric_definition"`.
+- Set `targetTables`, `requiredMetrics`, `filters`, `assumptions`, and
+  `metricDefinitions` to empty arrays.
+- Set `clarificationQuestion` to `null`.
+- Put the normalized snake_case metric name and formula in
+  `memoryUpdates.confirmedMetricDefinitions`.
+- Preserve the user's formula text as a formula hint. Do not convert it
+  to SQL and do not invent missing columns.
+- If the message both defines a metric and asks for data, prefer
+  `needs_clarification` and ask whether to save the definition first or
+  run the query.
+
 ## When to return `"ready"`
 
 Return `status: "ready"` only when:
@@ -144,5 +179,5 @@ Return `status: "ready"` only when:
   may reference. There is no other database, no `information_schema`,
   no other brand's data.
 - Do not reason about credentials, hostnames, or shard ids.
-- Do not output any keys other than the eleven listed in the contract.
+- Do not output any keys other than the twelve listed in the contract.
 - Output JSON only.

@@ -1,0 +1,32 @@
+[
+  {
+    "tenantId": "TMC",
+    "metricId": "gross_sales",
+    "formula": "SUM(gross_summary.gross_sales)",
+    "description": "Gross sales over time from the gross_summary rollup table.",
+    "synonyms": ["gross revenue", "gross sale", "total gross sales"],
+    "tables": ["gross_summary"],
+    "columns": ["date", "gross_sales"],
+    "version": "v1"
+  },
+  {
+    "tenantId": "TMC",
+    "metricId": "net_sales",
+    "formula": "SUM(gross_summary.net_sales)",
+    "description": "Net sales after discounts and returns from the gross_summary rollup table.",
+    "synonyms": ["net revenue", "net sale"],
+    "tables": ["gross_summary"],
+    "columns": ["date", "net_sales"],
+    "version": "v1"
+  },
+  {
+    "tenantId": "TMC",
+    "metricId": "discounts",
+    "formula": "SUM(gross_summary.discounts_total)",
+    "description": "Total discounts from the gross_summary rollup table.",
+    "synonyms": ["discount total", "discounts total", "total discounts"],
+    "tables": ["gross_summary"],
+    "columns": ["date", "discounts_total"],
+    "version": "v1"
+  }
+]

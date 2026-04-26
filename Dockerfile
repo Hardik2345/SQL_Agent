@@ -12,6 +12,8 @@ COPY apps ./apps
 COPY shared ./shared
 COPY prompts ./prompts
 COPY schema ./schema
+COPY scripts ./scripts
+COPY seed ./seed
 
 # Non-root runtime
 RUN addgroup -S app && adduser -S app -G app && chown -R app:app /app

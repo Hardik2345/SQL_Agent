@@ -29,22 +29,35 @@ export const VALIDATION_CODES = Object.freeze({
  */
 export const NODE = Object.freeze({
   LOAD_SCHEMA: 'load_schema',
+  LOAD_CONTEXT: 'load_context',
   PLAN: 'planner',
   GENERATE_SQL: 'generate_sql',
   VALIDATE: 'validate',
+  CORRECT: 'correct',
   EXECUTE: 'execute',
 });
 
 export const AGENT_STATUS = Object.freeze({
   PENDING: 'pending',
   SCHEMA_LOADED: 'schema_loaded',
+  CONTEXT_LOADED: 'context_loaded',
   PLANNED: 'planned',
   CLARIFICATION_REQUIRED: 'clarification_required',
+  MEMORY_UPDATE_REQUIRED: 'memory_update_required',
   SQL_DRAFTED: 'sql_drafted',
+  CORRECTING: 'correcting',
   VALIDATED: 'validated',
   EXECUTED: 'executed',
   FAILED: 'failed',
 });
+
+/**
+ * Hard ceiling on automated correction attempts. Configurable via the
+ * `MAX_CORRECTION_ATTEMPTS` env var; the compile-time default below is
+ * the safer fallback. Higher values cost LLM tokens and rarely
+ * converge if the SQL is fundamentally wrong.
+ */
+export const MAX_CORRECTION_ATTEMPTS_DEFAULT = 2;
 
 /** DDL / DML statement types rejected by the validation layer. */
 export const BLOCKED_DDL = new Set([

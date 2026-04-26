@@ -8,7 +8,6 @@ import { loadSchemaNode } from '../../apps/api/src/orchestrator/nodes/schema.nod
 import { planNode } from '../../apps/api/src/orchestrator/nodes/plan.node.js';
 import { sqlNode } from '../../apps/api/src/orchestrator/nodes/sql.node.js';
 import { validateNode } from '../../apps/api/src/orchestrator/nodes/validate.node.js';
-import { ValidationError } from '../../apps/api/src/utils/errors.js';
 import { schemaCache } from '../../apps/api/src/modules/schema/schemaCache.js';
 
 const tenant = {
@@ -97,7 +96,12 @@ describe('orchestrator nodes', () => {
     );
   });
 
-  it('validateNode throws on DML draft', async () => {
+  it('validateNode returns invalid result on DML draft (Phase 2C: no longer throws)', async () => {
+    // Phase 2C semantics: validate is no longer the place that throws
+    // on invalid SQL. Instead, the conditional `validationRouter` in
+    // graph.js routes invalid drafts to either correction or END.
+    // This test confirms the node returns the failing ValidationResult
+    // so the router has something to inspect.
     const base = initialState({ correlationId: 'c1', request, tenant });
     const withSchema = { ...base, ...(await loadSchemaNode(base)) };
     /** @type {any} */
@@ -110,9 +114,12 @@ describe('orchestrator nodes', () => {
         tables: ['gross_summary'],
       },
     };
-    await assert.rejects(
-      () => validateNode(bad),
-      (err) => err instanceof ValidationError,
+    const patch = await validateNode(bad);
+    assert.equal(patch.status, AGENT_STATUS.VALIDATED);
+    assert.equal(patch.validation.valid, false);
+    assert.ok(
+      patch.validation.issues.some((i) => i.severity === 'error'),
+      'expected at least one error-severity issue',
     );
   });
 });
@@ -129,7 +136,7 @@ describe('compiled graph', () => {
     // in apps/api/src/utils/constants.js. The conceptual graph order
     // (load_schema -> plan -> generate_sql -> validate -> execute) is
     // unchanged.
-    for (const expected of ['load_schema', 'planner', 'generate_sql', 'validate', 'execute']) {
+    for (const expected of ['load_schema', 'load_context', 'planner', 'generate_sql', 'validate', 'correct', 'execute']) {
       assert.ok(nodeIds.includes(expected), `missing node ${expected}; got ${nodeIds.join(',')}`);
     }
 
@@ -142,10 +149,16 @@ describe('compiled graph', () => {
       adj[from].push(to);
     }
     assert.ok(adj['__start__']?.includes('load_schema'), `expected __start__ -> load_schema, adj=${JSON.stringify(adj)}`);
-    assert.ok(adj['load_schema']?.includes('planner'));
+    // Phase 2D: load_context runs between load_schema and planner.
+    assert.ok(adj['load_schema']?.includes('load_context'));
+    assert.ok(adj['load_context']?.includes('planner'));
     assert.ok(adj['planner']?.includes('generate_sql'));
     assert.ok(adj['generate_sql']?.includes('validate'));
+    // Phase 2C: validate fans out to execute (success), correct (retry), or END (exhausted).
     assert.ok(adj['validate']?.includes('execute'));
+    assert.ok(adj['validate']?.includes('correct'));
+    assert.ok(adj['validate']?.includes('__end__'));
+    assert.ok(adj['correct']?.includes('validate'), 'correct must loop back to validate');
     assert.ok(adj['execute']?.includes('__end__'));
   });
 });

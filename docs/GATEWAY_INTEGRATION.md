@@ -105,6 +105,13 @@ sql-agent:
     TENANT_ROUTER_URL: http://tenant-router:3004
     GATEWAY_SHARED_SECRET: ${GATEWAY_SHARED_SECRET}
     X_PIPELINE_KEY: ${X_PIPELINE_KEY}
+    PASSWORD_AES_KEY: ${PASSWORD_AES_KEY}
+    REDIS_URL: redis://redis:6379
+    MONGO_URI: mongodb://mongo:27017
+    MONGO_DB: sql_agent
+    MONGO_METRICS_COLLECTION: metrics
+    QDRANT_URL: http://qdrant:6333
+    QDRANT_COLLECTION: semantic_metrics
   depends_on:
     tenant-router:
       condition: service_healthy
@@ -150,6 +157,11 @@ and change `context: ../SQL_agent` to `context: ./sql-agent`.
 `X_PIPELINE_KEY` is used by sql-agent to call tenant-router directly
 (bypassing the gateway, since they share the docker network). It should
 match the value tenant-router already has.
+
+For full Phase 2D real context retrieval, also run Redis, MongoDB, and
+Qdrant in the dashboard compose stack and set the provider URLs shown in
+the service block above. See `SQL_agent/docs/PHASE2D_REAL_CONTEXT.md` for
+the complete service definitions and seed flow.
 
 ---
 

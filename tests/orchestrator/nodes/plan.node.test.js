@@ -333,10 +333,11 @@ describe('plan.node — Phase 2B clarification handling', () => {
 });
 
 describe('plan.node — graph routing of needs_clarification', () => {
-  it('planRouter sends needs_clarification to END and ready to generate_sql', async () => {
+  it('planRouter sends terminal planner statuses to END and ready to generate_sql', async () => {
     const { planRouter } = await import('../../../apps/api/src/orchestrator/graph.js');
     const { END } = await import('@langchain/langgraph');
     assert.equal(planRouter({ plan: { status: 'needs_clarification' } }), END);
+    assert.equal(planRouter({ plan: { status: 'memory_update' } }), END);
     assert.equal(planRouter({ plan: { status: 'ready' } }), 'generate_sql');
     // Defensive: missing plan should NOT route to clarification.
     assert.equal(planRouter({}), 'generate_sql');

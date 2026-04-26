@@ -83,6 +83,118 @@ describe('insight.controller — buildResponseFromState (clarification path)', (
     assert.equal(result.question, undefined);
   });
 
+  it('returns the memory acknowledgement envelope when plan.status === "memory_update"', () => {
+    /** @type {any} */
+    const state = {
+      correlationId: 'c1',
+      plan: {
+        intent: 'chat_metric_definition',
+        targetTables: [],
+        requiredMetrics: [],
+        status: 'memory_update',
+        clarificationQuestion: null,
+        assumptions: [],
+        metricDefinitions: [],
+        memoryUpdates: {
+          confirmedMetricDefinitions: {
+            contribution_margin: 'net sales - discounts',
+          },
+        },
+      },
+      status: 'memory_update_required',
+    };
+
+    const response = buildResponseFromState(state, 'c1');
+    const result = /** @type {any} */ (response.result);
+    assert.equal(response.ok, true);
+    assert.equal(result.ok, true);
+    assert.equal(result.type, 'memory_ack');
+    assert.equal(
+      result.confirmedMetricDefinitions.contribution_margin,
+      'net sales - discounts',
+    );
+    assert.equal(result.rows, undefined);
+  });
+
+  it('emits the E_VALIDATION envelope when validation failed and correction was exhausted (Phase 2C)', async () => {
+    const { buildResponseFromState, httpStatusForState } = await import(
+      '../../apps/api/src/controllers/insight.controller.js'
+    );
+
+    /** @type {any} */
+    const state = {
+      correlationId: 'c1',
+      plan: {
+        intent: 'analytics_query',
+        targetTables: ['gross_summary'],
+        requiredMetrics: ['gross_sales'],
+        status: 'ready',
+        clarificationQuestion: null,
+        assumptions: [],
+        metricDefinitions: [],
+      },
+      sqlDraft: { sql: 'SELECT bad_col FROM gross_summary', dialect: 'mysql', tables: ['gross_summary'] },
+      validation: {
+        valid: false,
+        issues: [
+          {
+            code: 'V_COLUMN_NOT_ALLOWED',
+            message: 'Column not allowed on table gross_summary: bad_col',
+            severity: 'error',
+            meta: { table: 'gross_summary', column: 'bad_col' },
+          },
+        ],
+      },
+      // No execution — graph routed straight to END after correction exhausted.
+      correctionAttempts: 2,
+      correctionHistory: [
+        { attempt: 1, issues: [], previousSql: 'SELECT a', correctedSql: 'SELECT b', mode: 'mock' },
+        { attempt: 2, issues: [], previousSql: 'SELECT b', correctedSql: 'SELECT c', mode: 'mock' },
+      ],
+      status: 'validated',
+    };
+
+    const response = buildResponseFromState(state, 'c1');
+    assert.equal(response.ok, false);
+    assert.equal(response.correlationId, 'c1');
+    assert.equal(response.error.code, 'E_VALIDATION');
+    assert.match(response.error.message, /validation/i);
+    const details = /** @type {any} */ (response.error.details);
+    assert.equal(details.issues.length, 1);
+    assert.equal(details.issues[0].code, 'V_COLUMN_NOT_ALLOWED');
+    assert.equal(details.correctionAttempts, 2);
+    assert.equal(details.correctionHistory.length, 2);
+
+    // HTTP status helper pairs to 422.
+    assert.equal(httpStatusForState(state), 422);
+  });
+
+  it('still returns 200 + execution envelope when validation passed', async () => {
+    const { httpStatusForState } = await import(
+      '../../apps/api/src/controllers/insight.controller.js'
+    );
+    /** @type {any} */
+    const state = {
+      correlationId: 'c1',
+      plan: { status: 'ready' },
+      validation: { valid: true, issues: [] },
+      execution: { ok: true, columns: [], rows: [], stats: { rowCount: 0, elapsedMs: 1, truncated: false } },
+    };
+    assert.equal(httpStatusForState(state), 200);
+  });
+
+  it('still returns 200 for clarification', async () => {
+    const { httpStatusForState } = await import(
+      '../../apps/api/src/controllers/insight.controller.js'
+    );
+    /** @type {any} */
+    const state = {
+      correlationId: 'c1',
+      plan: { status: 'needs_clarification', clarificationQuestion: 'q?', requiredMetrics: [] },
+    };
+    assert.equal(httpStatusForState(state), 200);
+  });
+
   it('does not crash when log is omitted', () => {
     /** @type {any} */
     const state = {

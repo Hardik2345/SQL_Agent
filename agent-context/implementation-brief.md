@@ -1,4 +1,4 @@
-# SQL Agent — Implementation Brief (Phase 1 + 2A + 2B + 2B-B)
+# SQL Agent — Implementation Brief (Phase 1 + 2A + 2B + 2B-B + 2C + 2D)
 
 This brief summarizes the current state of the SQL Agent service. It is
 intended as context for a downstream agent that will continue
@@ -132,10 +132,42 @@ node, so the graph's conditional edge is the single source of truth.
 The deterministic validation layer remains the sole gate for SQL
 safety — the SQL node does NOT regex-check DDL/DML.
 
-**Not built** (Phase 2C+): correction loop, semantic layer (with
-persisted metric catalog), persisted chat context, insight
-generation, caching beyond the schema cache, result explanation,
-advanced planner logic.
+**Phase 2C (built)**: bounded correction loop. When validation fails,
+a conditional `validationRouter` edge sends the request to a new
+`correct` node (`apps/api/src/orchestrator/nodes/correction.node.js`)
+which receives the failing SQL plus the structured `V_*` issues and
+emits a replacement `SqlDraft`. The corrected draft loops back into
+`validate`. The loop is capped at `MAX_CORRECTION_ATTEMPTS`
+(env-overridable, default 2). When attempts exhaust, the graph routes
+to `END`; the controller renders the existing `E_VALIDATION` failure
+envelope with `correctionAttempts` + `correctionHistory` in
+`error.details` and a `422` HTTP status. The `validate` node no
+longer throws on invalid SQL — failure is a normal state transition
+the router consumes. The correction node mirrors the
+planner/SQL-generator pattern (factory, mock/llm modes, prompt
+context builder); mock mode returns the failing SQL unchanged so the
+loop exits at the cap without fabricating fixes.
+
+**Phase 2D (built)**: semantic layer + context persistence + hybrid
+retrieval. A new `load_context` node runs between `load_schema` and
+`planner`, populating `state.chatContext`, `state.globalContext`, and
+`state.retrievalContext`. Three pluggable providers are wired:
+**Redis** (chat memory), **MongoDB** (semantic catalog of metric
+formulas/synonyms), and **Qdrant** (vector candidates over an
+embedding service). Each provider is **fully optional** — when its
+env URL is unset, an in-memory fallback with the same async API
+keeps the system running with reduced grounding intelligence. The
+hybrid retrieval pipeline is `chat memory → vector candidates →
+catalog round-trip → globalContext`; vector hits are NEVER fed
+directly to SQL — they always flow through the catalog (the truth)
+before reaching the planner. After successful execution the
+controller writes a chat-memory delta via `extractMemoryFromPlan`
+(question + metric refs + filter refs + chat-confirmed metric
+definitions only — never SQL or LLM prose).
+
+**Not built** (Phase 2E+): result explanation, caching beyond the
+schema cache, advanced planner logic, vector-store ingestion
+pipeline, admin UI for `retrievalContext` traces.
 
 ---
 
@@ -161,6 +193,19 @@ SQL_agent/
 │   │   │   └── plannerContext.js
 │   │   ├── sql/                        ← Phase 2B-B
 │   │   │   └── sqlContext.js
+│   │   ├── correction/                 ← Phase 2C
+│   │   │   └── correctionContext.js
+│   │   ├── context/                    ← Phase 2D
+│   │   │   └── contextLoader.js
+│   │   ├── chatMemory/                 ← Phase 2D
+│   │   │   ├── chatMemoryProvider.js
+│   │   │   └── memoryExtractor.js
+│   │   ├── semantic/                   ← Phase 2D
+│   │   │   ├── semantic.types.js
+│   │   │   └── semanticProvider.js
+│   │   ├── vector/                     ← Phase 2D
+│   │   │   ├── embeddingService.js
+│   │   │   └── vectorClient.js
 │   │   ├── validation/
 │   │   │   ├── validator.js
 │   │   │   ├── rules/{syntax,safety,schema,cost}.rule.js
@@ -187,7 +232,7 @@ SQL_agent/
 ├── shared/{db/mysql.types,types/common.types}.js
 ├── prompts/{planner,sql,correction}.prompt.md
 ├── schema/schema.sql                   ← real tenant DDL (51 tables)
-├── tests/{validation,execution,orchestrator,middleware,schema,contracts,planner,sql,controllers}/*.test.js
+├── tests/{validation,execution,orchestrator,middleware,schema,contracts,planner,sql,correction,context,semantic,vector,chatMemory,controllers}/*.test.js
 ├── docs/GATEWAY_INTEGRATION.md
 ├── agent-context/{system-context,implementation-brief}.md
 ├── Dockerfile
@@ -251,22 +296,27 @@ Returns `{ ok: true }`. Used by Docker healthchecks.
 ```
 client → gateway → tenantContextMiddleware → insight.controller → orchestrator
                       │                                                │
-                      ├─ verify HMAC (x-gw-sig)                        ├─ load_schema [REAL]
-                      ├─ tenant-router POST /tenant/resolve            ├─ plan node   [REAL: mock|llm; clarification-aware]
-                      └─ normalize → req.tenant                        ├─ (conditional) → END if needs_clarification
-                                                                       ├─ sql node    [REAL: mock|llm]
-                                                                       ├─ validate    [REAL]
-                                                                       └─ execute     [REAL]
+                      ├─ verify HMAC (x-gw-sig)                        ├─ load_schema  [REAL]
+                      ├─ tenant-router POST /tenant/resolve            ├─ load_context [REAL — Redis|Mongo|Qdrant + in-memory fallbacks]
+                      └─ normalize → req.tenant                        ├─ plan node    [REAL: mock|llm; clarification-aware]
+                                                                       ├─ (conditional) → END if needs_clarification
+                                                                       ├─ sql node     [REAL: mock|llm]
+                                                                       ├─ validate     [REAL — non-throwing]
+                                                                       ├─ (conditional) → correct (loop, ≤ MAX) | END (exhausted)
+                                                                       ├─ correct      [REAL: mock|llm] → validate
+                                                                       └─ execute      [REAL] → (controller fire-and-forget memory write)
                                                                               │
                                                                               ▼
                                                                      tenant MySQL pool
 ```
 
-Graph edges (with the Phase 2B conditional after planner):
+Graph edges (with Phase 2B planner conditional, Phase 2C correction
+loop, and Phase 2D context loader):
 
 ```
-START → load_schema → planner ─┬─→ generate_sql → validate → execute → END
-                                └─→ END                (when plan.status = "needs_clarification")
+START → load_schema → load_context → planner ─┬─→ generate_sql → validate ─┬─→ execute → END
+                                               └─→ END (clarification)      ├─→ correct → validate (loop, ≤ MAX_CORRECTION_ATTEMPTS)
+                                                                            └─→ END   (correction exhausted; controller emits 422)
 ```
 
 > **Node id note**: the planner node is registered as `planner` (not
@@ -281,8 +331,40 @@ START → load_schema → planner ─┬─→ generate_sql → validate → exe
 > NEVER run in that branch. `planRouter` is exported for direct
 > testing.
 
-On validation failure the graph terminates with a `ValidationError`. No
-correction loop exists yet.
+> **Conditional edge (Phase 2C)**: after the validate node runs, a
+> `validationRouter(state)` function inspects
+> `state.validation.valid` and `state.correctionAttempts`. Three
+> outcomes:
+>
+>   - valid → `execute`
+>   - invalid AND attempts < `env.correction.maxAttempts` → `correct`
+>   - invalid AND attempts ≥ max → `END`
+>
+> When the loop exhausts, the controller's `buildResponseFromState`
+> returns the `E_VALIDATION` envelope with the failing `V_*` issues
+> and the full `correctionHistory` in `error.details`. HTTP status
+> is 422. `validationRouter` is exported for direct testing.
+
+> **load_context node (Phase 2D)**: runs between `load_schema` and
+> `planner`. Reads chat memory (Redis or in-memory), runs hybrid
+> retrieval over the semantic catalog (Mongo or in-memory) +
+> vector store (Qdrant or in-memory), and attaches `chatContext`,
+> `globalContext`, and `retrievalContext` to state. Never calls an
+> LLM. Never calls tenant-router or the tenant DB. Never mutates
+> `schemaContext`. All three external services are optional —
+> unset URLs trigger an in-memory fallback for that provider.
+> `retrievalContext.source` is one of
+> `memory|catalog|vector|hybrid|none` for trace observability.
+
+> **Memory write (Phase 2D)**: after a successful execution the
+> controller calls `extractMemoryFromPlan({request, plan, result})`
+> and writes the resulting delta via the chat memory provider.
+> Fire-and-forget — failures are logged and swallowed so a Redis
+> hiccup never breaks an otherwise-successful query. The delta
+> NEVER contains SQL, raw LLM output, or planner assumptions; only
+> the question, metric refs, filter refs, chat-confirmed metric
+> definitions, and a tiny structural result summary
+> (`rows=N; truncated=...`).
 
 ---
 
@@ -316,7 +398,17 @@ correction loop exists yet.
 | **Plan router (conditional edge)** | `orchestrator/graph.js` — `planRouter(state)` exported for tests |
 | **SQL node (mock + llm)** | `orchestrator/nodes/sql.node.js` — Phase 2B-B; mirrors planner factory pattern |
 | **SQL context builder** | `modules/sql/sqlContext.js` — pure function; scopes schema digest to `plan.targetTables` |
-| **Controller response builder** | `controllers/insight.controller.js` — `buildResponseFromState` exported for tests |
+| **Correction node (mock + llm)** | `orchestrator/nodes/correction.node.js` — Phase 2C; mirrors planner/SQL factory pattern; consumes failing draft + `V_*` issues |
+| **Correction context builder** | `modules/correction/correctionContext.js` — pure function; reuses `buildSqlSchemaDigest` |
+| **Validation router (conditional edge)** | `orchestrator/graph.js` — `validationRouter(state)` exported for tests |
+| **load_context node**          | `orchestrator/nodes/context.node.js` — Phase 2D; factory `createContextNode({ loader })` for test injection; reads `request.context.{userId,conversationId}` |
+| **Context loader**             | `modules/context/contextLoader.js` — Phase 2D; `createContextLoader({chatMemory, semantic, vector, topK})` pure DI surface; `createDefaultContextLoader()` env-driven default |
+| **Chat memory provider**       | `modules/chatMemory/chatMemoryProvider.js` — Phase 2D; Redis (lazy-import) + in-memory TTL fallback; tenant-scoped key `sql-agent:chat:{brandId}:{userId}:{conversationId}` |
+| **Memory extractor**           | `modules/chatMemory/memoryExtractor.js` — Phase 2D; pure `extractMemoryFromPlan({request, plan, result})` — never returns SQL or LLM prose |
+| **Semantic catalog**           | `modules/semantic/semanticProvider.js` — Phase 2D; MongoDB (lazy-import) + in-memory fallback; `metricsToGlobalContext` pure projection |
+| **Embedding service**          | `modules/vector/embeddingService.js` — Phase 2D; OpenAI (`@langchain/openai` lazy-import) + deterministic SHA-256 unit-normalised mock |
+| **Vector client**              | `modules/vector/vectorClient.js` — Phase 2D; Qdrant via `undici` (no extra dep) + in-memory cosine fallback; tenant-scoped filter |
+| **Controller response builder + status + memory write** | `controllers/insight.controller.js` — `buildResponseFromState` + `httpStatusForState` exported for tests; fire-and-forget `writeMemoryDelta` after execution |
 | **LLM client**      | `lib/llm.js` — `getLlm(role)` returns `{ invokeJson }`, OpenAI JSON-mode |
 | Error hierarchy     | `utils/errors.js`                                        |
 | Logger (redacted)   | `utils/logger.js`                                        |
@@ -389,6 +481,118 @@ client without touching env or pulling in `@langchain/openai`.
   cross-database refs — is the deterministic validation layer's job.
   The SQL node intentionally does NOT regex-check safety.
 
+### Correction node modes (Phase 2C)
+
+`correction.node.js` mirrors the planner and SQL nodes. Mode is
+controlled by `CORRECTION_MODE`:
+
+| Mode | When | Behavior |
+|------|------|----------|
+| `mock` (default) | `CORRECTION_MODE` unset, or any value other than `llm` | Returns the failing SQL unchanged with rationale `"[mock correction] unchanged"`. The next validate run fails with the same issues; loop exits at `MAX_CORRECTION_ATTEMPTS`. Conservative + CI-safe. |
+| `llm` | `CORRECTION_MODE=llm` (requires `OPENAI_API_KEY`) | Builds compact correction context via `buildCorrectionContext`, loads system prompt from `prompts/correction.prompt.md`, invokes the LLM via `getLlm('correction').invokeJson(...)` in JSON mode. Same sanitization (trim + ≤ 1 trailing semicolon) and same `assertSqlDraft` validation as the SQL node. |
+
+Both modes produce identical-shape `SqlDraft` output. The factory
+`createCorrectionNode({ mode, llm })` allows tests to inject a fake
+LLM client.
+
+### Correction node guarantees (Phase 2C)
+
+- **Pre-conditions**: throws `ContractError` if any of
+  `request`, `plan`, `schemaContext`, `sqlDraft`, `validation` is
+  missing; if `validation.valid === true`; if `validation.issues` is
+  empty; or if `plan.status === "needs_clarification"`. The router
+  should never route to correction in those cases — these are
+  defence-in-depth guards.
+- **Bounded loop**: `MAX_CORRECTION_ATTEMPTS` (default 2,
+  env-overridable, floor 0). Setting it to 0 disables the correction
+  loop entirely (single-shot validate).
+- **Plan fidelity**: prompt instructs "fix only the reported
+  `V_*` issues; do not re-plan; implement `metricDefinitions`
+  literally". A per-V_*-code fix-by-code table is in the prompt.
+- **State accumulation**:
+  - `state.correctionAttempts` — incremented monotonically (0 → N).
+  - `state.correctionHistory` — append-only audit trail of
+    `{attempt, issues, previousSql, correctedSql, mode}` entries.
+    Never contains credentials or routing data.
+- **Failure mode**: empty `sql` from the LLM (the prompt's
+  unfixable-plan escape) trips `assertSqlDraft` → `ContractError`.
+- **No SQL execution**. The correction node ONLY produces a
+  replacement draft. Validation must always run after correction
+  (graph edge `correct → validate` enforces this).
+
+### Context loader / providers (Phase 2D)
+
+`modules/context/contextLoader.js` is the only orchestrator-facing
+entry point for the three external services. It accepts injected
+providers (`chatMemory`, `semantic`, `vector`) so tests stay hermetic.
+
+**Hybrid retrieval pipeline**:
+
+1. Read chat memory for `(brandId, userId, conversationId)`.
+2. Vector search over `tenantId`-filtered points (best-effort —
+   failures are logged and skipped, the catalog still works).
+3. Round-trip vector candidate `metricId`s through the semantic
+   catalog to get authoritative formulas.
+4. Project the catalog hits into `globalContext.metrics` via
+   `metricsToGlobalContext`.
+5. Stamp `retrievalContext` with the source label and a debug blob.
+
+**Priority order** (planner enforces this; the loader just
+surfaces all sources):
+
+1. `chatContext.confirmedMetricDefinitions` — user confirmations.
+2. `globalContext.metrics` — semantic catalog truth.
+3. (Vector hits not in the catalog never reach the planner.)
+4. Otherwise: planner returns `needs_clarification`.
+
+**Fallback semantics** (each provider, independently):
+
+| Provider | When env URL set | When unset / package missing |
+|---|---|---|
+| Redis chat memory | Lazy-imports `redis`, real connection | In-memory `Map` with `expiresAt`-based TTL |
+| MongoDB semantic catalog | Lazy-imports `mongodb`, real connection | In-memory `Map` keyed by `${tenantId}:${metricId}` |
+| Qdrant vector store | Direct REST via `undici` (no extra dep) | In-memory `Map` + cosine similarity full-scan |
+| OpenAI embeddings | `@langchain/openai`, real model | Deterministic SHA-256-based unit-normalised stub |
+
+**Fallback discriminator**: each provider exposes a `mock: boolean`
+property and tests assert against it.
+
+### Memory write (Phase 2D)
+
+Side-effect on success path. The controller calls
+`extractMemoryFromPlan` and persists the delta via the chat memory
+provider. **Storage rules** (also enforced by the extractor's
+test suite):
+
+- ✅ user's `question` → appended to `previousQuestions` (capped at 10)
+- ✅ `plan.requiredMetrics` → `lastMetricRefs`
+- ✅ `plan.filters` → `lastFilterRefs`
+- ✅ `plan.metricDefinitions` where `source === 'chat_context'`
+  → `confirmedMetricDefinitions` (those are user-confirmed; global
+  formulas live in the catalog and would just shadow it)
+- ✅ tiny structural `lastResultSummary` ("rows=N; truncated=…") —
+  never rows themselves, never LLM-generated prose
+- ❌ never SQL (any form), never raw LLM rationale, never planner
+  assumptions, never tenant credentials / routing
+
+Memory write failures are caught and logged; they NEVER affect the
+HTTP response.
+
+### Validate node behaviour change (Phase 2C)
+
+`validate.node.js` no longer throws `ValidationError` on invalid SQL.
+Failure is now a normal state transition: the node returns the
+failing `ValidationResult` and the `validationRouter` decides whether
+to route to correction (loop), `END` (exhausted), or `execute` (when
+valid). Pre-condition errors (missing `sqlDraft` / `schemaContext`)
+still throw — those are programmer errors, not user errors.
+
+The controller picks up validation-failure-after-exhaustion via
+`buildResponseFromState`, which emits the existing `E_VALIDATION`
+envelope with `correctionAttempts` + `correctionHistory` in
+`error.details`. HTTP status is `422` (returned by the new
+`httpStatusForState` helper).
+
 ---
 
 ## 8. Contracts (stable interfaces)
@@ -417,17 +621,30 @@ ValidationResult     { valid, issues[], normalizedSql? }
 ExecutionStats       { rowCount, elapsedMs, truncated }
 ExecutionResult      { ok, columns[], rows[], stats, error?, errorCode? }
 
-// Phase 2B placeholders
+// Phase 2B placeholders, populated for real in Phase 2D
 GlobalContext        { metrics?: Record<name, { formula?, description?, synonyms? }>,
                        glossary?: Record<term, definition>,
                        synonyms?: Record<term, canonical> }
 ChatContext          { previousQuestions?: string[],
                        confirmedMetricDefinitions?: Record<name, formula>,
-                       lastUsedFilters?: object[], lastResultSummary?: string|null }
+                       lastUsedFilters?: object[], lastResultSummary?: string|null,
+                       lastMetricRefs?: string[], lastFilterRefs?: object[] }   // ← Phase 2D widening
+
+// Phase 2C
+CorrectionHistoryEntry { attempt, issues, previousSql, correctedSql?, mode: 'mock'|'llm' }
+
+// Phase 2D
+RetrievalContext     { vectorCandidates?: Array<{ metricId, score }>,
+                       resolvedMetricIds?: string[],
+                       source?: 'memory'|'catalog'|'vector'|'hybrid'|'none',
+                       debug?: Record<string, unknown> }
+SemanticMetric       { metricId, tenantId, formula?, description?, synonyms?, tables?, columns?, version? }
 
 AgentState           { correlationId, request, tenant,
-                       schemaContext?, globalContext?, chatContext?,
-                       plan?, sqlDraft?, validation?, execution?, status, error? }
+                       schemaContext?, globalContext?, chatContext?, retrievalContext?,
+                       plan?, sqlDraft?, validation?, execution?,
+                       correctionAttempts?, correctionHistory?,
+                       status, error? }
 TenantExecutionContext { brandId, database, host, port, shardId?, poolKey, credentials: { user, password } }
 
 // Phase 2A
@@ -605,17 +822,30 @@ Run: `npm test`. Lint: `npm run lint` (tsc with `checkJs`).
 |-------------------------------------------------|-------|----------------------------------------------------|
 | `tests/validation/validator.test.js`            | 11    | All four rules; valid + invalid cases (canonical SchemaContext shape) |
 | `tests/execution/executor.test.js`              | 5     | ExecutionInput contract validation                 |
-| `tests/orchestrator/graph.test.js`              | 8     | initialState, each node, missing-schema rejection, compiled-graph adjacency |
+| `tests/orchestrator/graph.test.js`              | 8     | initialState, each node, missing-schema rejection, compiled-graph adjacency (now includes `correct` node + validation conditional edges) |
 | `tests/orchestrator/nodes/plan.node.test.js`    | 14    | Mock-mode determinism, mock has Phase 2B shape, LLM-mode parsing, forbidden-key stripping, schema digest in prompt, ContractError on bad output, clarification flow for `cancellation_rate`, ready when formula in `globalContext`, chat-confirmed formula supersedes global, `planRouter` routes correctly |
-| `tests/orchestrator/nodes/sql.node.test.js`     | 15    | Mock-mode determinism (no LLM call), LLM-mode parsing, **trailing-semicolon stripped**, **prompt carries question + plan + schema digest + metricDefinitions + assumptions**, missing inputs rejected, **needs_clarification refused at SQL node**, empty SQL / wrong dialect / missing fields rejected, transport errors wrapped, factory injection honoured |
+| `tests/orchestrator/nodes/sql.node.test.js`     | 15    | Mock-mode determinism (no LLM call), LLM-mode parsing, trailing-semicolon stripped, prompt carries question + plan + schema digest + metricDefinitions + assumptions, missing inputs rejected, needs_clarification refused at SQL node, empty SQL / wrong dialect / missing fields rejected, transport errors wrapped, factory injection honoured |
+| `tests/orchestrator/nodes/correction.node.test.js` | 25 | Mock-mode unchanged-SQL determinism + history accumulation + no-credential guarantee, LLM-mode parsing + prompt contents (question, plan, failed SQL, V_* codes, schema digest), trailing-semicolon stripped, empty SQL / wrong dialect / transport-error rejection, **8 pre-condition guards** (missing fields, valid validation, empty issues, needs_clarification plan), **`validationRouter` routing matrix** (valid → execute, invalid + attempts < max → correct, invalid + exhausted → END, missing attempts → 0) |
 | `tests/contracts/queryPlan.test.js`             | 7     | Phase 2B widened shape, normalization defaults, `needs_clarification` w/ empty `targetTables`, cross-rule rejections, bad source enum, empty clarification |
 | `tests/planner/plannerContext.test.js`          | 6     | Schema digest format, global+chat metric merge precedence, synonyms folding, recent-questions cap, no-credentials guarantee, missing-question error |
-| `tests/sql/sqlContext.test.js`                  | 11    | Question / plan / dialect passthrough, `metricDefinitions` + `assumptions` carried, **scoped to `targetTables` only — unrelated tables never leak**, projected tables carry types + PK, defensive fallback to all tables on empty target list, **no credentials / tenant routing / raw dump in serialized output**, missing-input errors, `buildSqlSchemaDigest` table scoping |
-| `tests/controllers/insight.controller.test.js`  | 3     | Clarification envelope; execution envelope still works for `ready`; works without log |
+| `tests/sql/sqlContext.test.js`                  | 11    | Question / plan / dialect passthrough, `metricDefinitions` + `assumptions` carried, scoped to `targetTables` only — unrelated tables never leak, projected tables carry types + PK, defensive fallback to all tables on empty target list, no credentials / tenant routing / raw dump in serialized output, missing-input errors, `buildSqlSchemaDigest` table scoping |
+| `tests/correction/correctionContext.test.js`    | 6     | Question + plan + failed SQL + dialect passthrough, V_* issue codes preserved, `metricDefinitions`/`assumptions` carried, scoped to `targetTables` — unrelated tables never leak, attempt + maxAttempts metadata, no credentials / tenant routing / raw dump, missing-input errors |
+| `tests/orchestrator/nodes/context.node.test.js` | 5     | Phase 2D — attaches all three contexts, missing-input guards, planner consumes the new patch shape, **graph wiring** verifies `load_schema → load_context → planner` and `load_schema` does NOT skip `load_context` |
+| `tests/context/contextLoader.test.js`           | 11    | Phase 2D hybrid retrieval — empty grounding when nothing seeded, vector → catalog round-trip builds `globalContext.metrics`, chat memory surfaces in `chatContext`, **vector failures non-fatal** (graceful), missing-input errors, **memoryExtractor only persists chat-confirmed metric definitions**, never stores SQL |
+| `tests/chatMemory/chatMemoryProvider.test.js`   | 7     | Phase 2D — normalize/merge helpers (capping, delta-precedence), in-memory get/update, **TTL respected**, **tenant-scoped keys**, env fallback discriminator |
+| `tests/semantic/semanticProvider.test.js`       | 6     | Phase 2D — tenant-scoped `getMetricsByIds` (never returns other brand), synonym lookup (case-insensitive), `metricsToGlobalContext` projection, env fallback |
+| `tests/vector/vectorClient.test.js`             | 6     | Phase 2D — deterministic embeddings stable + unit-normalised, in-memory cosine ranking, **tenant-scoped vector filter**, empty-input guards, env fallback |
+| `tests/controllers/insight.controller.test.js`  | 6     | Clarification envelope; execution envelope still works for `ready`; works without log; `E_VALIDATION` envelope after correction exhausted (with `correctionAttempts` + `correctionHistory` in details); `httpStatusForState` returns 422 / 200 correctly |
 | `tests/middleware/tenantContext.test.js`        | 4     | Missing/bad/expired signature; body-brandId ignored|
 | `tests/schema/schemaProvider.test.js`           | 12    | Parser real-dump coverage, cache reuse, credential leak guard, assertSchemaContext invariants |
 
-Current status: **96/96 passing, 0 lint errors.**
+Current status: **169/169 passing, 0 lint errors.**
+
+> **Hermetic test runner**: `npm test` now sets
+> `PLANNER_MODE=mock SQL_MODE=mock CORRECTION_MODE=mock` via `env`
+> prefix on each spawned `node --test` so tests don't pick up
+> developer `.env` overrides (which often have `=llm` set for live
+> dev runs).
 
 > **Test runner note**: `npm test` uses
 > `find tests -name '*.test.js' -print0 | xargs -0 node --test` rather
@@ -644,10 +874,23 @@ Defined in `.env.example`. Runtime validation in `config/env.js`.
 | `EXEC_MAX_ROWS` | default 10000 | |
 | `POOL_CONNECTION_LIMIT` | default 10 | per-tenant pool size |
 | `POOL_IDLE_TIMEOUT_MS` | default 600000 | |
-| `OPENAI_API_KEY` | when `PLANNER_MODE=llm` or `SQL_MODE=llm` | OpenAI key for any LLM-backed node. Not required in mock mode. |
+| `OPENAI_API_KEY` | when any `*_MODE=llm` | OpenAI key for any LLM-backed node. Not required in mock mode. |
 | `LLM_MODEL` | default `gpt-4o-mini` | Model used by `lib/llm.js` for all roles (`planner`, `sql`, `correction`). Per-role overrides live in `config/models.js`. |
 | `PLANNER_MODE` | default `mock` | `mock` (deterministic) or `llm` (real LLM call). Anything else = `mock` (fail-safe). |
 | `SQL_MODE` | default `mock` | `mock` (deterministic SELECT against `gross_summary`) or `llm` (real SQL generator). Anything else = `mock` (fail-safe). |
+| `CORRECTION_MODE` | default `mock` | `mock` (return failing SQL unchanged — loop exits at cap) or `llm` (real correction). Anything else = `mock` (fail-safe). |
+| `MAX_CORRECTION_ATTEMPTS` | default `2` | Cap on correction retries before `E_VALIDATION` is returned. Set to `0` to disable correction (single-shot validate). Must be ≥ 0. |
+| `REDIS_URL` | optional (Phase 2D) | When set, chat memory uses real Redis. Unset → in-memory provider. |
+| `CHAT_MEMORY_TTL_SECONDS` | default `86400` | Chat memory TTL. Same setting honoured by both Redis and in-memory paths. |
+| `MONGO_URI` | optional (Phase 2D) | When set, semantic catalog uses real Mongo. Unset → in-memory empty catalog. |
+| `MONGO_DB` | default `sql_agent` | Mongo database name when `MONGO_URI` is set. |
+| `MONGO_METRICS_COLLECTION` | default `metrics` | Collection name for `SemanticMetric` documents. |
+| `QDRANT_URL` | optional (Phase 2D) | When set, vector store uses Qdrant via REST. Unset → in-memory cosine fallback. |
+| `QDRANT_API_KEY` | optional | Sent as `api-key` header when present. |
+| `QDRANT_COLLECTION` | default `semantic_metrics` | Qdrant collection name. |
+| `EMBEDDING_MODEL` | default `text-embedding-3-small` | Model used when an OpenAI key is set. Otherwise the deterministic SHA-256 mock is used. |
+| `EMBEDDING_DIMENSIONS` | default `1536` | Vector dimension for the embedding service (mock + real). |
+| `VECTOR_TOP_K` | default `5` | How many vector candidates to fetch before the catalog round-trip. |
 | `PORT` | default 4000 | |
 | `LOG_LEVEL` | default info | |
 
@@ -744,6 +987,71 @@ public entry point.
   schema to the SQL generator on every request wastes tokens and
   invites the LLM to wander into unrelated tables. Keep the digest
   scoped to the plan's chosen tables.
+- **`validate.node.js` does not throw on invalid SQL** — Phase 2C
+  changed the contract. Failure is a state transition that the
+  `validationRouter` consumes. Reintroducing a `throw` here would
+  bypass the correction loop and make the tests fail. Pre-condition
+  errors (missing `sqlDraft` / `schemaContext`) DO still throw —
+  those are programmer errors.
+- **Correction node NEVER executes SQL** — the only thing it
+  produces is a replacement `SqlDraft`. Validation MUST run after
+  every correction. The graph edge `correct → validate` enforces
+  this; do not add a path that skips validate.
+- **Bounded correction loop** — `env.correction.maxAttempts` is
+  the single source of truth. Don't bypass it from inside the
+  correction node. The `validationRouter` is the gatekeeper that
+  routes to `END` when attempts exhaust.
+- **`correctionHistory` is append-only** — the correction node
+  reads previous history off state and writes
+  `[...prev, newEntry]`. Tests rely on prior entries being
+  preserved across attempts. Don't change it to last-write-only.
+- **No credentials / routing in `correctionHistory`** — the entry
+  shape is `{attempt, issues, previousSql, correctedSql, mode}`.
+  Tests verify nothing else leaks. Don't widen with sensitive
+  fields.
+- **`E_VALIDATION` is the only error code after exhausted
+  correction** — the controller's
+  validation-failure-after-exhaustion branch deliberately reuses the
+  existing code so frontend behaviour for "SQL failed validation"
+  is unchanged whether correction was tried or not. Don't introduce
+  a new code like `E_CORRECTION_EXHAUSTED`.
+- **Vector → catalog round-trip is mandatory (Phase 2D)** — the
+  vector store returns `metricId` candidates only. NEVER feed
+  vector hits into `globalContext.metrics`, `requiredMetrics`, or
+  the SQL prompt directly. Always look the candidate up in the
+  semantic catalog first — that's the truth. Adding a code path
+  that uses vector payloads as authoritative breaks the priority
+  ordering the planner depends on.
+- **Provider fallbacks must remain pluggable** — every external
+  service (Redis, Mongo, Qdrant, embeddings) MUST keep its
+  in-memory fallback. Removing a fallback would make tests require
+  the corresponding service to be running, breaking CI. The
+  `mock: boolean` discriminator on each provider is the
+  test-injection seam.
+- **Lazy-import optional packages** — `redis`, `mongodb`, and
+  `@langchain/openai` are imported with a variable specifier so TS
+  doesn't try to resolve them at compile time. Don't replace those
+  with static `import` statements; the packages are intentionally
+  optional.
+- **Tenant scoping in providers is by composite key** — the
+  in-memory variants use `${tenantId}:${id}` keys (semantic catalog
+  + vector store) and the chat memory key is
+  `sql-agent:chat:${brandId}:${userId}:${conversationId}`. This is
+  belt-and-braces with the per-call `tenantId` parameter; do not
+  rely on the parameter alone.
+- **Memory write is fire-and-forget** — the controller calls
+  `writeMemoryDelta(finalState).catch(() => {})`. Make it block /
+  await the response and a Redis hiccup will start failing user
+  requests. Keep it post-response.
+- **`memoryExtractor` is a strict allow-list** — only the listed
+  fields are persisted (question, metric refs, filter refs,
+  chat-confirmed metric definitions, structural result summary).
+  Don't add SQL, raw rationale, or planner assumptions; the test
+  suite verifies these specifically.
+- **`load_context` runs between `load_schema` and `planner` —
+  always.** Reordering or skipping it means the planner runs without
+  any grounding from chat memory or the semantic catalog,
+  regressing Phase 2D entirely.
 
 ---
 
@@ -787,49 +1095,61 @@ other modules if contracts are respected.
 - Validation layer remains the sole SQL safety gate — the SQL node
   intentionally does not regex-check DDL/DML.
 
-### A. Add the correction loop (Phase 2C) — NEXT
-- Prompt: `prompts/correction.prompt.md`.
-- Orchestrator change: conditional edge after `validate` —
-  `validate → correct → validate (bounded retries) → execute | FAIL`.
-  Mirror the `planRouter` pattern in `graph.js` — export a small
-  router function for direct testing.
-- Cap at `MAX_CORRECTION_ATTEMPTS` (policy constant, suggest 2).
-- Respect all V_* validation codes; never re-submit a DDL/DML even
-  after correction.
-- Reuse `lib/llm.js` facade with role `'correction'` (already
-  configured in `config/models.js`).
-- Reuse the `createXxxNode({ mode, llm })` factory pattern from the
-  planner and SQL nodes so tests can inject a fake LLM.
-- The correction node consumes: `state.sqlDraft`, the failing
-  `state.validation.issues[]`, and the same SchemaContext + plan
-  context the SQL generator used. Output contract is `SqlDraft`
-  (replaces the failing draft on state).
-- Mode flag suggestion: `CORRECTION_MODE=mock|llm` (default `mock`)
-  for CI parity with `PLANNER_MODE` and `SQL_MODE`.
+### ~~A. Add the correction loop~~ — DONE (Phase 2C)
+- Prompt: `prompts/correction.prompt.md` (active; per-V_*-code
+  fix-by-code table).
+- Node: `apps/api/src/orchestrator/nodes/correction.node.js`.
+- Context builder: `apps/api/src/modules/correction/correctionContext.js`.
+- Conditional edge: `validationRouter` in `graph.js`
+  (valid → execute, invalid + attempts < max → correct, exhausted
+  → END). Both `planRouter` and `validationRouter` exported for
+  direct testing.
+- Cap: `env.correction.maxAttempts` (`MAX_CORRECTION_ATTEMPTS`
+  env var, default 2; floor 0 disables correction entirely).
+- LLM client: `getLlm('correction').invokeJson(messages)` (role
+  already configured in `config/models.js`).
+- Mock mode returns failing SQL unchanged so the loop exits at
+  the cap without fabricating fixes (CI-safe).
+- `validate.node.js` no longer throws on invalid SQL; controller
+  emits `E_VALIDATION` envelope with `correctionAttempts` +
+  `correctionHistory` in `error.details` after exhaustion.
 
-### B. Introduce a semantic layer + populate global/chat context (Phase 2D)
-- Replaces / wraps the schema provider with a per-tenant projection
-  that crops `allowedTables` / `allowedColumns` to a curated subset
-  (the metrics + dimensions a brand has approved for natural-language
-  query).
-- Same `SchemaContext` contract — the provider's signature does not
-  change. The semantic layer lives behind `getSchemaContext` and
-  decides what to expose. Both planner and SQL generator are already
-  wired to consume whatever the provider returns.
-- **Populate `globalContext`**: per-brand metric catalog (with
-  formulas, descriptions, synonyms) loaded into `state.globalContext`
-  before the planner runs. Drop-in: just attach via a new node before
-  `planner` (or extend `load_schema`). Planner already reads it.
-- **Populate `chatContext`**: persist confirmed metric definitions
-  across turns of the same conversation. Planner already reads it
-  and chat-confirmed entries already supersede global.
-- No planner code change required when wiring either of these in.
+### ~~A. Introduce a semantic layer + populate global/chat context~~ — DONE (Phase 2D)
+- New `load_context` node between `load_schema` and `planner`.
+- Three pluggable providers (Redis / Mongo / Qdrant) with in-memory
+  fallbacks; system runs without any of them.
+- Hybrid retrieval: chat memory → vector candidates → semantic
+  catalog round-trip → `globalContext.metrics`.
+- Memory write after successful execution via
+  `extractMemoryFromPlan` (strict allow-list — never SQL).
+- All factory-injectable for tests.
 
-### C. Add result explanation (Phase 2E)
+### A. Add result explanation (Phase 2E) — NEXT
 - New node after `execute`. Takes `ExecutionResult` + original
   `QueryRequest`, produces a natural-language summary.
 - Keep it optional and behind a feature flag — not every caller wants
   it.
+- Mirror the `createXxxNode({ mode, llm })` pattern (mock = no-op
+  passthrough; llm = LLM summary). Reuse `lib/llm.js` with role
+  `'explanation'` (add to `config/models.js`).
+- Output a new optional `state.explanation` field plus a controller
+  branch that surfaces it in the success envelope.
+
+### B. Vector ingestion pipeline (Phase 2F)
+- Today's vector store is read-only inside the request path. There
+  is no batch job that takes the Mongo semantic catalog and embeds
+  + upserts metric records into Qdrant. Build a small CLI / cron
+  utility that reads the catalog, calls `embedText` over
+  `metricId + description + synonyms`, and upserts via
+  `vectorClient.upsertPoints`. Idempotent. Tenant-scoped.
+
+### C. Caching beyond the schema cache (Phase 2G)
+- The schema dump cache exists. Semantic catalog hits and vector
+  candidates currently re-fetch on every request. A short-TTL cache
+  keyed on `(brandId, question)` would cut Mongo + Qdrant load on
+  repeated queries within a session. Must respect chat memory
+  updates — either include a memory fingerprint in the key or use a
+  tight TTL (e.g. 60s).
 
 ---
 
@@ -848,36 +1168,68 @@ other modules if contracts are respected.
    mock+llm modes AND clarification handling; reference for the
    `createXxxNode({ mode, llm })` pattern.
 8. `apps/api/src/orchestrator/nodes/sql.node.js` — SQL generator with
-   mock+llm modes; reference for the same pattern in Phase 2C
-   correction loop.
-9. `apps/api/src/modules/planner/plannerContext.js` — pure-function
-   prompt-context builder for the planner.
-10. `apps/api/src/modules/sql/sqlContext.js` — pure-function
+   mock+llm modes; one of the references for the
+   `createXxxNode({ mode, llm })` pattern.
+9. `apps/api/src/orchestrator/nodes/correction.node.js` — Phase 2C
+   correction node; same factory pattern, plus `correctionAttempts` /
+   `correctionHistory` accumulation and pre-condition guards.
+10. `apps/api/src/modules/planner/plannerContext.js` — pure-function
+    prompt-context builder for the planner.
+11. `apps/api/src/modules/sql/sqlContext.js` — pure-function
     prompt-context builder for the SQL generator (scopes digest to
     `plan.targetTables`).
-11. `apps/api/src/modules/contracts/queryPlan.js` — Phase 2B widened
+12. `apps/api/src/modules/correction/correctionContext.js` — pure
+    builder that mirrors `sqlContext.js` and adds the failing-SQL +
+    `V_*` issues + attempt metadata.
+13. `apps/api/src/orchestrator/nodes/context.node.js` — Phase 2D
+    `load_context` node; reference for nodes that wrap async
+    provider chains.
+14. `apps/api/src/modules/context/contextLoader.js` — hybrid
+    retrieval orchestrator. Pure-DI surface
+    (`createContextLoader({chatMemory, semantic, vector})`) is the
+    test-injection seam.
+15. `apps/api/src/modules/chatMemory/chatMemoryProvider.js` —
+    Redis-or-in-memory provider with TTL. Includes
+    `normalizeChatContext` and `mergeChatContext` helpers used by
+    both the loader and the memory writer.
+16. `apps/api/src/modules/chatMemory/memoryExtractor.js` — pure
+    `extractMemoryFromPlan`. Strict allow-list — never returns SQL
+    or LLM prose.
+17. `apps/api/src/modules/semantic/semanticProvider.js` —
+    Mongo-or-in-memory catalog. `metricsToGlobalContext` is the
+    pure projection used by the loader.
+18. `apps/api/src/modules/vector/vectorClient.js` —
+    Qdrant-via-undici-or-in-memory vector store; tenant-scoped
+    cosine search.
+19. `apps/api/src/modules/vector/embeddingService.js` —
+    OpenAI-or-deterministic embedding service.
+20. `apps/api/src/modules/contracts/queryPlan.js` — Phase 2B widened
     contract with normalization + cross-validation. Read this before
     touching the planner output shape.
-12. `apps/api/src/modules/contracts/sqlDraft.js` — SQL output
-    contract; the SQL node validates against this.
-13. `apps/api/src/lib/llm.js` — shared LLM facade
+21. `apps/api/src/modules/contracts/sqlDraft.js` — SQL output
+    contract; the SQL and correction nodes validate against this.
+22. `apps/api/src/lib/llm.js` — shared LLM facade
     (`getLlm(role).invokeJson(messages)`).
-14. `apps/api/src/orchestrator/graph.js` — `planRouter(state)`
-    conditional edge; pattern to extend for Phase 2C correction loop.
-15. `apps/api/src/controllers/insight.controller.js` —
-    `buildResponseFromState` exported pure helper for the
-    clarification envelope.
-16. `apps/api/src/modules/validation/validator.js` — the deterministic
+23. `apps/api/src/orchestrator/graph.js` — `planRouter` and
+    `validationRouter` conditional edges; pattern to extend for
+    further conditional flows.
+24. `apps/api/src/controllers/insight.controller.js` —
+    `buildResponseFromState` (clarification + execution +
+    validation-failure envelopes), `httpStatusForState`, and the
+    fire-and-forget `writeMemoryDelta` Phase 2D hook.
+25. `apps/api/src/modules/validation/validator.js` — the deterministic
     safety layer you must not bypass.
-17. `apps/api/src/modules/validation/rules/schema.rule.js` — how the
+26. `apps/api/src/modules/validation/rules/schema.rule.js` — how the
     SchemaContext is consumed by the validator.
-18. `schema/schema.sql` — the authoritative tenant schema.
-19. `docs/GATEWAY_INTEGRATION.md` — deployment context.
-20. `prompts/planner.prompt.md` — active. The prompt for the LLM-backed
+27. `schema/schema.sql` — the authoritative tenant schema.
+28. `docs/GATEWAY_INTEGRATION.md` — deployment context.
+29. `prompts/planner.prompt.md` — active. The prompt for the LLM-backed
     planner with clarification rules.
-21. `prompts/sql.prompt.md` — active. The prompt for the LLM-backed
+30. `prompts/sql.prompt.md` — active. The prompt for the LLM-backed
     SQL generator with plan-fidelity / metric-literal rules.
-22. `prompts/correction.prompt.md` — draft for Phase 2C.
+31. `prompts/correction.prompt.md` — active. The prompt for the
+    Phase 2C correction node, with the per-V_*-code fix-by-code
+    table.
 
 ---
 
@@ -917,13 +1269,41 @@ other modules if contracts are respected.
 > deterministic validation layer (the only SQL safety gate in the
 > graph). Validate is parser-based and LLM-free, enforcing four
 > rules (syntax, safety, schema, cost) using the SchemaContext from
-> state. Execution is tenant-isolated via per-brand mysql2 pools with
-> server-level READ ONLY and timeout enforcement. Credentials never
-> appear in logs. All module-boundary data is validated at runtime
-> against JSDoc-typed contracts. The remaining Phase 2 work is the
-> correction loop on validation failure (Phase 2C — mirrors the SQL
-> node's mode + factory pattern), and later wiring real persistence
-> behind `globalContext` / `chatContext` and a semantic-layer
-> projection over the SchemaContext — none of which require touching
-> validation, execution, the gateway middleware, or the existing
-> contracts.
+> state. Validate no longer throws on failure (Phase 2C): a
+> `validationRouter` conditional edge sends valid drafts to
+> `execute`, invalid drafts to the correction node while attempts
+> remain, and exhausted attempts to `END`. The correction node
+> mirrors the planner/SQL pattern (factory, mock/llm modes, prompt
+> context builder, JSON-mode LLM call), receives the failing SQL plus
+> the structured `V_*` issues, and emits a replacement `SqlDraft`.
+> The loop is bounded by `MAX_CORRECTION_ATTEMPTS` (env, default 2;
+> 0 disables). Mock correction returns the failing SQL unchanged so
+> the loop exits at the cap rather than fabricating fixes. After
+> exhaustion the controller emits the existing `E_VALIDATION` error
+> envelope (HTTP 422) with `correctionAttempts` and
+> `correctionHistory` in `error.details`. Phase 2D inserts a
+> `load_context` node between `load_schema` and `planner`. It hits
+> three pluggable providers — Redis for chat memory, MongoDB for
+> the semantic catalog of metric formulas, and Qdrant for vector
+> candidates over an embedding service. Each provider has an
+> in-memory fallback that kicks in when its env URL is unset, so
+> the system runs (with reduced grounding intelligence) without any
+> external service. The retrieval pipeline is `chat memory →
+> vector candidates → catalog round-trip → globalContext`; vector
+> hits are NEVER fed directly to SQL — they're always rounded
+> through the catalog (the truth) before reaching the planner.
+> After successful execution the controller writes a chat-memory
+> delta via `extractMemoryFromPlan` (question + metric refs +
+> filter refs + chat-confirmed metric definitions only — never SQL
+> or LLM prose). The write is fire-and-forget; Redis hiccups never
+> affect the response. Execution is tenant-isolated via per-brand
+> mysql2 pools with server-level READ ONLY and timeout enforcement.
+> Credentials never appear in logs, in `correctionHistory`, or in
+> `chatContext`. All module-boundary data is validated at runtime
+> against JSDoc-typed contracts. The remaining Phase 2 work is an
+> optional result-explanation node after `execute` (Phase 2E), a
+> vector-ingestion CLI to populate Qdrant from the Mongo catalog
+> (Phase 2F), and a short-TTL retrieval cache (Phase 2G) — none of
+> which require touching validation, execution, the gateway
+> middleware, the correction loop, the context loader, or the
+> existing contracts.

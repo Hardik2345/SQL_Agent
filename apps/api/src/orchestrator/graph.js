@@ -1,12 +1,15 @@
 import { END, START, StateGraph } from '@langchain/langgraph';
 import { AGENT_STATUS, NODE } from '../utils/constants.js';
+import { env } from '../config/env.js';
 import { logger } from '../utils/logger.js';
 import { toAppError } from '../utils/errors.js';
 import { initialState, stateChannels } from './state.js';
 import { loadSchemaNode } from './nodes/schema.node.js';
+import { loadContextNode } from './nodes/context.node.js';
 import { planNode } from './nodes/plan.node.js';
 import { sqlNode } from './nodes/sql.node.js';
 import { validateNode } from './nodes/validate.node.js';
+import { correctionNode } from './nodes/correction.node.js';
 import { executeNode } from './nodes/execute.node.js';
 
 /**
@@ -33,17 +36,19 @@ const StateGraphCtor = /** @type {new (args: any) => any} */ (/** @type {unknown
 const builder = new StateGraphCtor({ channels: stateChannels });
 
 builder.addNode(NODE.LOAD_SCHEMA, loadSchemaNode);
+builder.addNode(NODE.LOAD_CONTEXT, loadContextNode);
 builder.addNode(NODE.PLAN, planNode);
 builder.addNode(NODE.GENERATE_SQL, sqlNode);
 builder.addNode(NODE.VALIDATE, validateNode);
+builder.addNode(NODE.CORRECT, correctionNode);
 builder.addNode(NODE.EXECUTE, executeNode);
 
 /**
- * Conditional router that runs after the planner. When the plan
- * carries `status: "needs_clarification"` (Phase 2B), we stop the
- * graph immediately — there is no SQL to generate, validate, or
- * execute. The controller inspects `state.plan.status` and renders the
- * clarification response.
+ * Conditional router that runs after the planner. Terminal planner
+ * statuses (`needs_clarification`, `memory_update`) stop the graph
+ * immediately — there is no SQL to generate, validate, or execute.
+ * The controller inspects `state.plan.status` and renders/persists the
+ * appropriate response.
  *
  * Exposed for testing so the routing logic can be exercised without
  * compiling a graph.
@@ -51,16 +56,52 @@ builder.addNode(NODE.EXECUTE, executeNode);
  * @param {{ plan?: { status?: string } }} state
  */
 export const planRouter = (state) =>
-  state?.plan?.status === 'needs_clarification' ? END : NODE.GENERATE_SQL;
+  state?.plan?.status === 'needs_clarification' || state?.plan?.status === 'memory_update'
+    ? END
+    : NODE.GENERATE_SQL;
+
+/**
+ * Conditional router that runs after `validate`. Decides among three
+ * outcomes (Phase 2C):
+ *
+ *   - validation passed                                  → execute
+ *   - failed AND correctionAttempts < MAX_CORRECTION     → correct
+ *   - failed AND correctionAttempts >= MAX_CORRECTION    → END
+ *                                                          (controller
+ *                                                          renders 422)
+ *
+ * Exposed for direct testing of the routing logic without running the
+ * compiled graph.
+ *
+ * @param {{
+ *   validation?: { valid?: boolean },
+ *   correctionAttempts?: number,
+ * }} state
+ */
+export const validationRouter = (state) => {
+  if (state?.validation?.valid === true) return NODE.EXECUTE;
+  const attempts = state?.correctionAttempts ?? 0;
+  if (attempts < env.correction.maxAttempts) return NODE.CORRECT;
+  return END;
+};
 
 builder.addEdge(START, NODE.LOAD_SCHEMA);
-builder.addEdge(NODE.LOAD_SCHEMA, NODE.PLAN);
+builder.addEdge(NODE.LOAD_SCHEMA, NODE.LOAD_CONTEXT);
+builder.addEdge(NODE.LOAD_CONTEXT, NODE.PLAN);
 builder.addConditionalEdges(NODE.PLAN, planRouter, {
   [NODE.GENERATE_SQL]: NODE.GENERATE_SQL,
   [END]: END,
 });
 builder.addEdge(NODE.GENERATE_SQL, NODE.VALIDATE);
-builder.addEdge(NODE.VALIDATE, NODE.EXECUTE);
+builder.addConditionalEdges(NODE.VALIDATE, validationRouter, {
+  [NODE.EXECUTE]: NODE.EXECUTE,
+  [NODE.CORRECT]: NODE.CORRECT,
+  [END]: END,
+});
+// Correction always loops back to validate; the validate→router cycle
+// is what decides whether the next iteration executes, retries, or
+// gives up after MAX_CORRECTION_ATTEMPTS.
+builder.addEdge(NODE.CORRECT, NODE.VALIDATE);
 builder.addEdge(NODE.EXECUTE, END);
 
 export const compiledGraph = builder.compile();

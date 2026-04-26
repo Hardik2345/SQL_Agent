@@ -1,5 +1,8 @@
 import pino from 'pino';
+import { createRequire } from 'node:module';
 import { env, isProduction } from '../config/env.js';
+
+const require = createRequire(import.meta.url);
 
 const baseOptions = {
   level: env.logLevel,
@@ -24,19 +27,32 @@ const baseOptions = {
   timestamp: pino.stdTimeFunctions.isoTime,
 };
 
-export const logger = isProduction
-  ? pino(baseOptions)
-  : pino({
-      ...baseOptions,
-      transport: {
-        target: 'pino-pretty',
-        options: {
-          colorize: true,
-          translateTime: 'SYS:HH:MM:ss.l',
-          ignore: 'pid,hostname,service',
-        },
+const hasPrettyTransport = () => {
+  try {
+    require.resolve('pino-pretty');
+    return true;
+  } catch {
+    return false;
+  }
+};
+
+const createLogger = () => {
+  if (isProduction || !hasPrettyTransport()) return pino(baseOptions);
+
+  return pino({
+    ...baseOptions,
+    transport: {
+      target: 'pino-pretty',
+      options: {
+        colorize: true,
+        translateTime: 'SYS:HH:MM:ss.l',
+        ignore: 'pid,hostname,service',
       },
-    });
+    },
+  });
+};
+
+export const logger = createLogger();
 
 /**
  * Create a child logger bound to request-scoped context.

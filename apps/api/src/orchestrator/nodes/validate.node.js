@@ -1,24 +1,27 @@
 import { AGENT_STATUS } from '../../utils/constants.js';
 import { logger } from '../../utils/logger.js';
-import { ValidationError } from '../../utils/errors.js';
 import { validate } from '../../modules/validation/validator.js';
 
 /**
  * Validate node: runs the validation pipeline against the current SQL
  * draft using the SchemaContext that the load_schema node attached
- * earlier. If validation fails, the graph terminates with a
- * ValidationError — Phase 1 has no correction loop.
+ * earlier.
  *
- * Phase 2A change: the schema context is no longer hard-coded inside
- * this node. It must be present on `state.schemaContext` (populated by
- * the load_schema node which runs first in the graph). If absent, this
- * node fails with an internal error rather than silently using a stub
- * schema — that would be a serious safety regression.
+ * Phase 2C change: this node no longer throws when validation fails.
+ * Failure is a normal state transition that the conditional edge
+ * `validationRouter` (in graph.js) routes to either the correction
+ * node (if attempts remain) or END (if exhausted). After END, the
+ * controller's `buildResponseFromState` renders the failure envelope
+ * with the existing `E_VALIDATION` code. Throwing here would bypass
+ * the correction loop entirely.
+ *
+ * Pre-conditions still throw (these are programmer errors, not user
+ * errors): missing `sqlDraft` and missing `schemaContext`.
  *
  * @param {import('../../modules/contracts/agentState.js').AgentState} state
  */
 export const validateNode = async (state) => {
-  const { sqlDraft, tenant, schemaContext, correlationId } = state;
+  const { sqlDraft, tenant, schemaContext, correlationId, correctionAttempts } = state;
   if (!sqlDraft) {
     throw new Error('validateNode requires an sqlDraft');
   }
@@ -39,13 +42,16 @@ export const validateNode = async (state) => {
         event: 'node.validate.failed',
         correlationId,
         brandId: tenant.brandId,
-        issues: result.issues,
+        correctionAttempts: correctionAttempts ?? 0,
+        issueCodes: result.issues
+          .filter((i) => i.severity === 'error')
+          .map((i) => i.code),
       },
-      'validation failed — halting orchestrator',
+      'validation failed — router will decide between correction and END',
     );
-    throw new ValidationError('SQL failed validation', {
-      issues: result.issues,
-    });
+    // Status stays "validated" semantically (we DID run validation);
+    // the router decides the next hop based on `validation.valid`.
+    return { validation: result, status: AGENT_STATUS.VALIDATED };
   }
 
   logger.info(

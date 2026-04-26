@@ -19,15 +19,19 @@ import { asPlainObject, isNonEmptyString } from '../../utils/helpers.js';
  * @property {string[]}            [filters]                 Logical filter hints (non-SQL).
  * @property {string}              [timeGrain]               Optional time grain (day/week/month/…).
  * @property {string}              [notes]                   Free-form planner notes carried downstream.
- * @property {'ready'|'needs_clarification'} status          Whether downstream nodes may proceed.
+ * @property {'ready'|'needs_clarification'|'memory_update'} status
+ *                                                            Whether downstream nodes may proceed or stop.
  * @property {string|null}         clarificationQuestion     Set iff status="needs_clarification".
  * @property {string[]}            assumptions               Assumptions the planner relied on,
  *                                                            grounded in the provided context.
  * @property {MetricDefinition[]}  metricDefinitions         Resolved metric definitions used by the plan.
+ * @property {{ confirmedMetricDefinitions?: Record<string, string> }} [memoryUpdates]
+ *                                                            Chat-scoped updates to persist when status="memory_update".
  */
 
 const READY = 'ready';
 const NEEDS_CLARIFICATION = 'needs_clarification';
+const MEMORY_UPDATE = 'memory_update';
 
 const stringOrNullCheck = (value, path) => {
   if (value === null) return [];
@@ -42,6 +46,13 @@ const metricDefinitionSchema = check.object({
   source: check.oneOf(['global_context', 'chat_context', 'planner_assumption']),
 });
 
+const memoryUpdatesSchema = check.object({
+  confirmedMetricDefinitions: check.record(
+    check.string({ min: 1, max: 4000 }),
+    { required: false },
+  ),
+}, { required: false });
+
 const schema = check.object({
   intent: check.nonEmptyString(),
   // Allow empty targetTables when status === 'needs_clarification'. The
@@ -52,10 +63,11 @@ const schema = check.object({
   filters: check.array(check.nonEmptyString(), { required: false }),
   timeGrain: check.nonEmptyString({ required: false }),
   notes: check.string({ required: false, max: 4000 }),
-  status: check.oneOf([READY, NEEDS_CLARIFICATION]),
+  status: check.oneOf([READY, NEEDS_CLARIFICATION, MEMORY_UPDATE]),
   clarificationQuestion: stringOrNullCheck,
   assumptions: check.array(check.string({ max: 1000 })),
   metricDefinitions: check.array(metricDefinitionSchema),
+  memoryUpdates: memoryUpdatesSchema,
 });
 
 /**
@@ -87,6 +99,16 @@ const normalizePlan = (raw) => {
   return out;
 };
 
+const hasConfirmedMetricDefinitions = (plan) => {
+  const defs = plan.memoryUpdates?.confirmedMetricDefinitions;
+  return Boolean(
+    defs &&
+      typeof defs === 'object' &&
+      !Array.isArray(defs) &&
+      Object.keys(defs).length > 0,
+  );
+};
+
 /**
  * Validate ready/clarification cross-rules that can't be expressed in
  * the field-level schema cleanly.
@@ -102,6 +124,15 @@ const crossValidate = (plan) => {
       errs.push(
         'QueryPlan.clarificationQuestion must be a non-empty string when status="needs_clarification"',
       );
+    }
+  } else if (status === MEMORY_UPDATE) {
+    if (!hasConfirmedMetricDefinitions(plan)) {
+      errs.push(
+        'QueryPlan.memoryUpdates.confirmedMetricDefinitions must contain at least one entry when status="memory_update"',
+      );
+    }
+    if (plan.clarificationQuestion !== null) {
+      errs.push('QueryPlan.clarificationQuestion must be null when status="memory_update"');
     }
   } else if (status === READY) {
     if (!Array.isArray(plan.targetTables) || plan.targetTables.length === 0) {

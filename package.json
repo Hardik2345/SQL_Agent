@@ -12,10 +12,11 @@
     "start": "node apps/api/src/server.js",
     "dev": "node --watch apps/api/src/server.js",
     "lint": "tsc -p jsconfig.json --noEmit",
-    "test": "find tests -name '*.test.js' -print0 | xargs -0 node --test",
+    "test": "find tests -name '*.test.js' -print0 | xargs -0 env PLANNER_MODE=mock SQL_MODE=mock CORRECTION_MODE=mock node --test",
     "test:validation": "node --test tests/validation/*.test.js",
     "test:execution": "node --test tests/execution/*.test.js",
-    "test:orchestrator": "node --test tests/orchestrator/*.test.js"
+    "test:orchestrator": "node --test tests/orchestrator/*.test.js",
+    "seed:phase2d": "node scripts/seed-phase2d-context.js"
   },
   "dependencies": {
     "@langchain/core": "^0.3.0",
@@ -24,10 +25,12 @@
     "dotenv": "^16.4.5",
     "express": "^4.19.2",
     "langchain": "^0.3.0",
+    "mongodb": "^7.2.0",
     "mysql2": "^3.11.0",
     "node-sql-parser": "^5.3.0",
     "pino": "^9.3.0",
     "pino-http": "^10.2.0",
+    "redis": "^5.12.1",
     "undici": "^6.19.0"
   },
   "devDependencies": {
