@@ -10,8 +10,9 @@ You receive these blocks in the user message:
 
 - `Question`: the original end-user analytics question.
 - `Plan`: a `QueryPlan` object with the canonical fields (`intent`,
-  `targetTables`, `requiredMetrics`, `filters`, `timeGrain`, `notes`,
-  `metricDefinitions`, `assumptions`). Treat the plan as authoritative.
+  `targetTables`, `requiredMetrics`, `resultShape`, `dimensions`,
+  `filters`, `timeGrain`, `notes`, `metricDefinitions`, `assumptions`).
+  Treat the plan as authoritative.
 - `Tables`: a list of allowed tables for this compile, each with its
   columns (name + MySQL type) and primary key.
 - `AllowedColumns`: a `{ table: [columns…] }` map for the same tables.
@@ -61,7 +62,7 @@ be `}`.
 8. **Plan fidelity.** Use the planner's `targetTables` as your table
    list. If `metricDefinitions` are present, implement those formulas
    **exactly** — do not substitute alternatives. Respect `filters`
-   and `timeGrain` from the plan.
+   `resultShape`, `dimensions`, and `timeGrain` from the plan.
 9. **`tables` must list every table referenced by `sql`.** If you
    join three tables, include all three.
 10. **No comments inside the SQL** (no `--`, no `/* */`).
@@ -85,6 +86,26 @@ be `}`.
   flags violations with `V_GROUP_BY_INVALID`.
 - Prefer `ORDER BY` on indexed columns (the primary key, or the time
   column for time-series queries).
+
+## Result shape rules
+
+`Plan.resultShape` is authoritative and controls aggregation:
+
+- `single_aggregate`: return one summarized row. Do **not** use
+  `GROUP BY`, even if filters span multiple dates. Do not select date or
+  dimension columns. Example: "total sales for product X in last 3 days".
+- `time_series`: return one row per time bucket. Use `GROUP BY` on the
+  requested time dimension/bucket from `Plan.dimensions` /
+  `Plan.timeGrain`, and `ORDER BY` the same bucket.
+- `grouped_breakdown`: return one row per requested non-time dimension.
+  Use `GROUP BY` for every dimension in `Plan.dimensions`; order by the
+  primary metric unless the question asks otherwise.
+- `detail_rows`: return raw/detail records. Do not aggregate unless the
+  plan explicitly includes aggregate metrics; include a sensible `LIMIT`.
+
+If `resultShape = single_aggregate`, any `GROUP BY` is a contract
+violation unless the plan is internally contradictory. In that case,
+prefer `single_aggregate` over `timeGrain`.
 
 ## When the plan is `metricDefinitions`-grounded
 

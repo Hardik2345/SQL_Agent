@@ -54,6 +54,8 @@ const samplePlan = {
   intent: 'metric_over_time',
   targetTables: ['orders'],
   requiredMetrics: ['total_orders', 'gross_sales'],
+  resultShape: 'time_series',
+  dimensions: ['date'],
   filters: ['status = paid'],
   timeGrain: 'day',
   notes: 'paid orders only',

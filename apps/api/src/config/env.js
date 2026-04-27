@@ -107,6 +107,30 @@ export const env = Object.freeze({
     uri: process.env.MONGO_URI ?? '',
     db: process.env.MONGO_DB ?? 'sql_agent',
     metricsCollection: process.env.MONGO_METRICS_COLLECTION ?? 'metrics',
+    chatMemoryCollection: process.env.MONGO_CHAT_MEMORY_COLLECTION ?? 'chat_memory',
+    chatMemoryTtlSeconds: toInt(process.env.CHAT_MEMORY_MONGO_TTL_SECONDS, 90 * 24 * 60 * 60),
+  }),
+  chatMemorySync: Object.freeze({
+    intervalMs: toInt(process.env.CHAT_MEMORY_SYNC_INTERVAL_MS, 5 * 60 * 1000),
+    batchSize: toInt(process.env.CHAT_MEMORY_SYNC_BATCH_SIZE, 100),
+  }),
+  kafka: Object.freeze({
+    brokers: (process.env.KAFKA_BROKERS ?? '')
+      .split(',')
+      .map((broker) => broker.trim())
+      .filter(Boolean),
+    clientId: process.env.KAFKA_CLIENT_ID ?? 'sql-agent',
+    ssl: toBool(process.env.KAFKA_SSL, false),
+    saslMechanism: process.env.KAFKA_SASL_MECHANISM ?? '',
+    saslUsername: process.env.KAFKA_SASL_USERNAME ?? '',
+    saslPassword: process.env.KAFKA_SASL_PASSWORD ?? '',
+  }),
+  chatMemoryKafka: Object.freeze({
+    enabled: toBool(process.env.CHAT_MEMORY_KAFKA_ENABLED, false),
+    topic: process.env.CHAT_MEMORY_KAFKA_TOPIC ?? 'sql-agent.chat-memory.changed',
+    consumerGroup: process.env.CHAT_MEMORY_KAFKA_CONSUMER_GROUP ?? 'sql-agent-chat-memory-archive',
+    batchSize: toInt(process.env.CHAT_MEMORY_KAFKA_BATCH_SIZE, 500),
+    flushMs: toInt(process.env.CHAT_MEMORY_KAFKA_FLUSH_MS, 5000),
   }),
   qdrant: Object.freeze({
     url: process.env.QDRANT_URL ?? '',

@@ -16,6 +16,9 @@ import { asPlainObject, isNonEmptyString } from '../../utils/helpers.js';
  * @property {string[]}            targetTables              Tables the planner intends to query.
  *                                                            May be empty when status="needs_clarification".
  * @property {string[]}            requiredMetrics           Metrics or aggregates the answer requires.
+ * @property {'single_aggregate'|'time_series'|'grouped_breakdown'|'detail_rows'} resultShape
+ *                                                            Expected output shape for SQL generation.
+ * @property {string[]}            dimensions                Grouping/detail dimensions requested by the user.
  * @property {string[]}            [filters]                 Logical filter hints (non-SQL).
  * @property {string}              [timeGrain]               Optional time grain (day/week/month/…).
  * @property {string}              [notes]                   Free-form planner notes carried downstream.
@@ -32,6 +35,12 @@ import { asPlainObject, isNonEmptyString } from '../../utils/helpers.js';
 const READY = 'ready';
 const NEEDS_CLARIFICATION = 'needs_clarification';
 const MEMORY_UPDATE = 'memory_update';
+const RESULT_SHAPES = Object.freeze([
+  'single_aggregate',
+  'time_series',
+  'grouped_breakdown',
+  'detail_rows',
+]);
 
 const stringOrNullCheck = (value, path) => {
   if (value === null) return [];
@@ -60,6 +69,8 @@ const schema = check.object({
   // below.
   targetTables: check.array(check.nonEmptyString()),
   requiredMetrics: check.array(check.nonEmptyString()),
+  resultShape: check.oneOf(RESULT_SHAPES),
+  dimensions: check.array(check.nonEmptyString()),
   filters: check.array(check.nonEmptyString(), { required: false }),
   timeGrain: check.nonEmptyString({ required: false }),
   notes: check.string({ required: false, max: 4000 }),
@@ -81,6 +92,8 @@ const schema = check.object({
  *  - clarificationQuestion  → null
  *  - assumptions            → []
  *  - metricDefinitions      → []
+ *  - resultShape            → "time_series" when timeGrain exists, otherwise "single_aggregate"
+ *  - dimensions             → [] (or ["date"] for legacy time-series plans)
  *
  * Existing fields are NEVER renamed or removed by this function. If the
  * input is not an object, it is returned untouched and the contract
@@ -96,6 +109,12 @@ const normalizePlan = (raw) => {
   if (out.clarificationQuestion === undefined) out.clarificationQuestion = null;
   if (out.assumptions === undefined) out.assumptions = [];
   if (out.metricDefinitions === undefined) out.metricDefinitions = [];
+  if (out.resultShape === undefined) {
+    out.resultShape = out.timeGrain ? 'time_series' : 'single_aggregate';
+  }
+  if (out.dimensions === undefined) {
+    out.dimensions = out.resultShape === 'time_series' ? ['date'] : [];
+  }
   return out;
 };
 
@@ -134,11 +153,20 @@ const crossValidate = (plan) => {
     if (plan.clarificationQuestion !== null) {
       errs.push('QueryPlan.clarificationQuestion must be null when status="memory_update"');
     }
+    if (plan.resultShape !== 'detail_rows') {
+      errs.push('QueryPlan.resultShape must be "detail_rows" when status="memory_update"');
+    }
   } else if (status === READY) {
     if (!Array.isArray(plan.targetTables) || plan.targetTables.length === 0) {
       errs.push(
         'QueryPlan.targetTables must contain at least one entry when status="ready"',
       );
+    }
+    if (plan.resultShape === 'single_aggregate' && Array.isArray(plan.dimensions) && plan.dimensions.length > 0) {
+      errs.push('QueryPlan.dimensions must be empty when resultShape="single_aggregate"');
+    }
+    if (plan.resultShape === 'time_series' && (!Array.isArray(plan.dimensions) || plan.dimensions.length === 0)) {
+      errs.push('QueryPlan.dimensions must contain a time dimension when resultShape="time_series"');
     }
   }
   return errs;

@@ -1,5 +1,10 @@
 import { env } from '../../config/env.js';
 import { logger } from '../../utils/logger.js';
+import {
+  chatMemoryRedisKeyFor,
+  createChatMemoryArchive,
+} from './chatMemoryArchive.js';
+import { createChatMemoryKafkaProducer } from './chatMemoryKafkaProducer.js';
 
 /**
  * @typedef {import('../contracts/agentState.js').ChatContext} ChatContext
@@ -74,8 +79,7 @@ export const mergeChatContext = (existing, delta) => {
   return next;
 };
 
-const keyFor = ({ brandId, userId, conversationId }) =>
-  `sql-agent:chat:${brandId}:${userId}:${conversationId}`;
+const keyFor = chatMemoryRedisKeyFor;
 
 /**
  * In-memory chat-memory provider. Honours the configured TTL by
@@ -123,33 +127,52 @@ const createInMemoryChatMemoryProvider = (cfg) => {
  * package; if it's not installed we log + return the in-memory
  * fallback so the system still runs.
  *
- * @param {{ url: string, ttlSeconds: number }} cfg
+ * @param {{
+ *   url: string,
+ *   ttlSeconds: number,
+ *   archive?: import('./chatMemoryArchive.js').ChatMemoryArchive|null,
+ *   kafkaProducer?: ReturnType<typeof createChatMemoryKafkaProducer>|null,
+ *   client?: any,
+ * }} cfg
  * @returns {Promise<ChatMemoryProvider>}
  */
-const createRedisChatMemoryProvider = async (cfg) => {
+export const createRedisChatMemoryProvider = async (cfg) => {
   /** @type {any} */
   let mod;
-  try {
-    // Variable-specifier dynamic import so TypeScript skips
-    // module-resolution at type-check time. The `redis` package is
-    // optional — only required when REDIS_URL is set.
-    const specifier = 'redis';
-    mod = await import(specifier);
-  } catch (err) {
-    logger.error(
-      { event: 'chatmemory.redis.import_failed', err: String(err) },
-      'redis package not installed; falling back to in-memory chat memory',
-    );
-    return createInMemoryChatMemoryProvider({ ttlSeconds: cfg.ttlSeconds });
+  if (!cfg.client) {
+    try {
+      // Variable-specifier dynamic import so TypeScript skips
+      // module-resolution at type-check time. The `redis` package is
+      // optional — only required when REDIS_URL is set.
+      const specifier = 'redis';
+      mod = await import(specifier);
+    } catch (err) {
+      logger.error(
+        { event: 'chatmemory.redis.import_failed', err: String(err) },
+        'redis package not installed; falling back to in-memory chat memory',
+      );
+      return createInMemoryChatMemoryProvider({ ttlSeconds: cfg.ttlSeconds });
+    }
   }
 
-  const client = mod.createClient({ url: cfg.url });
-  client.on('error', (err) => {
-    logger.error({ event: 'chatmemory.redis.error', err: String(err) }, 'redis error');
-  });
+  const client = cfg.client ?? mod.createClient({ url: cfg.url });
+  if (typeof client.on === 'function') {
+    client.on('error', (err) => {
+      logger.error({ event: 'chatmemory.redis.error', err: String(err) }, 'redis error');
+    });
+  }
 
   const ensureConnected = async () => {
-    if (!client.isOpen) await client.connect();
+    if (!client.isOpen && typeof client.connect === 'function') await client.connect();
+  };
+
+  const writeRedis = async (redisKey, memory) => {
+    const payload = JSON.stringify(memory);
+    if (cfg.ttlSeconds > 0) {
+      await client.set(redisKey, payload, { EX: cfg.ttlSeconds });
+    } else {
+      await client.set(redisKey, payload);
+    }
   };
 
   return {
@@ -161,8 +184,38 @@ const createRedisChatMemoryProvider = async (cfg) => {
     },
     getChatContext: async (key) => {
       await ensureConnected();
-      const raw = await client.get(keyFor(key));
-      if (!raw) return normalizeChatContext({});
+      const redisKey = keyFor(key);
+      const raw = await client.get(redisKey);
+      if (!raw) {
+        if (!cfg.archive) return normalizeChatContext({});
+        try {
+          const archived = await cfg.archive.getSnapshot(key);
+          if (!archived) return normalizeChatContext({});
+          await writeRedis(redisKey, archived);
+          logger.debug(
+            {
+              event: 'chatmemory.mongo.fallback_hit',
+              brandId: key.brandId,
+              userId: key.userId,
+              conversationId: key.conversationId,
+            },
+            'chat memory restored from mongo archive',
+          );
+          return normalizeChatContext(archived);
+        } catch (err) {
+          logger.warn(
+            {
+              event: 'chatmemory.mongo.fallback_failed',
+              err: String(err),
+              brandId: key.brandId,
+              userId: key.userId,
+              conversationId: key.conversationId,
+            },
+            'chat memory archive lookup failed; returning empty',
+          );
+          return normalizeChatContext({});
+        }
+      }
       try {
         return normalizeChatContext(JSON.parse(raw));
       } catch (err) {
@@ -177,12 +230,21 @@ const createRedisChatMemoryProvider = async (cfg) => {
       await ensureConnected();
       const k = keyFor(key);
       const raw = await client.get(k);
-      const base = raw ? JSON.parse(raw) : {};
+      let base = {};
+      if (raw) {
+        try {
+          base = JSON.parse(raw);
+        } catch (err) {
+          logger.warn(
+            { event: 'chatmemory.redis.parse_failed', err: String(err) },
+            'failed to parse chat memory before update; overwriting from empty',
+          );
+        }
+      }
       const next = mergeChatContext(base, memoryDelta);
-      if (cfg.ttlSeconds > 0) {
-        await client.set(k, JSON.stringify(next), { EX: cfg.ttlSeconds });
-      } else {
-        await client.set(k, JSON.stringify(next));
+      await writeRedis(k, next);
+      if (cfg.kafkaProducer) {
+        await cfg.kafkaProducer.publishChanged(key);
       }
       return next;
     },
@@ -206,7 +268,18 @@ export const createChatMemoryProvider = async (options = {}) => {
     );
     return createInMemoryChatMemoryProvider({ ttlSeconds });
   }
-  return createRedisChatMemoryProvider({ url, ttlSeconds });
+  const archive = await createChatMemoryArchive();
+  const kafkaProducer = createChatMemoryKafkaProducer();
+  return createRedisChatMemoryProvider({
+    url,
+    ttlSeconds,
+    archive,
+    kafkaProducer,
+  });
 };
 
-export const _internal = { createInMemoryChatMemoryProvider };
+export const _internal = {
+  createInMemoryChatMemoryProvider,
+  createRedisChatMemoryProvider,
+  keyFor,
+};

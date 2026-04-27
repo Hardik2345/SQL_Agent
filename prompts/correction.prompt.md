@@ -60,13 +60,18 @@ last must be `}`.
    column list.
 8. **Plan fidelity.** Use the planner's `targetTables`. Implement
    `metricDefinitions` formulas **literally** — do not substitute
-   algebraic equivalents. Respect `filters` and `timeGrain`.
-9. **Fix only what was flagged.** Do not rewrite parts of the SQL
+   algebraic equivalents. Respect `filters`, `resultShape`,
+   `dimensions`, and `timeGrain`.
+9. **Result shape fidelity.** If `Plan.resultShape` is
+   `single_aggregate`, the corrected SQL must not use `GROUP BY` and
+   must not select date/dimension columns. If it is `time_series` or
+   `grouped_breakdown`, group by the requested dimensions.
+10. **Fix only what was flagged.** Do not rewrite parts of the SQL
    that weren't called out by the validator. Smaller, targeted
    corrections are more likely to converge within `MaxAttempts`.
-10. **`tables` must list every table referenced by the corrected SQL.**
-11. **No comments inside the SQL** (no `--`, no `/* */`).
-12. **No environment-style placeholders** (no `${…}`, no `%s`).
+11. **`tables` must list every table referenced by the corrected SQL.**
+12. **No comments inside the SQL** (no `--`, no `/* */`).
+13. **No environment-style placeholders** (no `${…}`, no `%s`).
 
 ## Fix-by-code guidance
 

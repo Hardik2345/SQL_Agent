@@ -16,7 +16,9 @@
     "test:validation": "node --test tests/validation/*.test.js",
     "test:execution": "node --test tests/execution/*.test.js",
     "test:orchestrator": "node --test tests/orchestrator/*.test.js",
-    "seed:phase2d": "node scripts/seed-phase2d-context.js"
+    "seed:phase2d": "node scripts/seed-phase2d-context.js",
+    "sync:chat-memory": "node scripts/sync-chat-memory.js",
+    "sync:chat-memory:kafka": "node scripts/sync-chat-memory-kafka.js"
   },
   "dependencies": {
     "@langchain/core": "^0.3.0",
@@ -24,6 +26,7 @@
     "@langchain/openai": "^0.3.0",
     "dotenv": "^16.4.5",
     "express": "^4.19.2",
+    "kafkajs": "^2.2.4",
     "langchain": "^0.3.0",
     "mongodb": "^7.2.0",
     "mysql2": "^3.11.0",

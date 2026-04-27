@@ -146,7 +146,9 @@ Node responsibilities:
   trace data using Redis, MongoDB, and Qdrant when configured.
 - `planner` returns a validated `QueryPlan` in `mock` or `llm` mode.
   The planner receives a compact digest of all allowed tables plus
-  semantic/chat context.
+  semantic/chat context. It also chooses `resultShape` and `dimensions`
+  so SQL generation knows whether to produce one aggregate row, a time
+  series, a grouped breakdown, or detail rows.
 - `generate_sql` returns a validated MySQL `SqlDraft` in `mock` or `llm`
   mode. It receives only the planner-selected target table schemas.
 - `validate` runs deterministic SQL validation. Failures route to
@@ -202,15 +204,33 @@ LIMIT 30
 Every rule returns structured issues with stable codes (`V_*`). The
 validator is **deterministic** and never calls an LLM.
 
+## Result Shapes
+
+The planner contract includes `resultShape` and `dimensions` to prevent
+the SQL generator from guessing the output shape:
+
+| `resultShape` | Meaning | SQL shape |
+|---------------|---------|-----------|
+| `single_aggregate` | One summarized value, e.g. “total sales for product X”. | Aggregate without `GROUP BY`. |
+| `time_series` | Trend over time, e.g. “sales by day”. | Aggregate with `GROUP BY` on a time bucket. |
+| `grouped_breakdown` | Aggregate by non-time dimensions, e.g. “sales by product”. | Aggregate with `GROUP BY` on requested dimensions. |
+| `detail_rows` | Raw/listed records, e.g. “list orders”. | Row-level `SELECT` with `LIMIT`. |
+
+For example, “total sales of product X in last 3 days” should be
+`single_aggregate` and return one row. “total sales by day for product X”
+should be `time_series` and return one row per day.
+
 ## Context Retrieval and Memory
 
 Phase 2D adds real context retrieval before planning:
 
-- **Redis chat memory** stores recent questions, confirmed metric
-  definitions, last metric refs, last filter refs, and a small structural
-  result summary.
+- **Redis chat memory** stores the hot conversation snapshot: recent
+  questions, confirmed metric definitions, last metric refs, last filter
+  refs, and a small structural result summary.
 - **MongoDB semantic catalog** stores authoritative metric definitions by
   tenant.
+- **MongoDB chat memory archive** stores durable snapshots of Redis chat
+  memory for cross-Redis-restart recovery and read fallback.
 - **Qdrant vector retrieval** finds candidate metric ids for the current
   question, then MongoDB resolves those ids into formulas/descriptions.
 - **Embeddings** use `text-embedding-3-small` when `OPENAI_API_KEY` is set;
@@ -245,6 +265,34 @@ Chat memory keys use:
 ```text
 sql-agent:chat:<brandId>:<userId>:<conversationId>
 ```
+
+Redis remains the request-time write path. In production, enable Kafka event
+publishing and run the Kafka archive worker:
+
+```bash
+npm run sync:chat-memory:kafka
+```
+
+The API publishes one lightweight event per changed conversation after Redis
+is updated. The worker dedupes by `brandId:userId:conversationId`, reads the
+latest Redis snapshot, and bulk upserts MongoDB every
+`CHAT_MEMORY_KAFKA_FLUSH_MS` or `CHAT_MEMORY_KAFKA_BATCH_SIZE` unique chats.
+
+The Redis scan worker remains available for backfill/repair:
+
+```bash
+npm run sync:chat-memory
+```
+
+For a one-shot backfill/test pass:
+
+```bash
+npm run sync:chat-memory -- --once
+```
+
+On API reads, Redis is checked first. If Redis misses and `MONGO_URI` is
+configured, the provider checks MongoDB `MONGO_CHAT_MEMORY_COLLECTION`; a hit
+is returned and rehydrated back into Redis with `CHAT_MEMORY_TTL_SECONDS`.
 
 The request body should include context for stable conversation memory:
 
@@ -335,9 +383,23 @@ Important variables:
 | `DEV_LOG_GENERATED_SQL` | Dev-only flag that logs generated/corrected SQL text when `NODE_ENV` is not `production`. |
 | `REDIS_URL` | Redis connection URL for chat memory. Falls back to in-memory when unset. |
 | `CHAT_MEMORY_TTL_SECONDS` | Redis chat memory TTL; default `86400`. |
-| `MONGO_URI` | MongoDB URI for semantic metric catalog. Falls back to in-memory when unset. |
+| `MONGO_URI` | MongoDB URI for semantic metric catalog and chat-memory archive. Falls back to in-memory/no archive when unset. |
 | `MONGO_DB` | Mongo database name, default `sql_agent`. |
 | `MONGO_METRICS_COLLECTION` | Mongo metrics collection, default `metrics`. |
+| `MONGO_CHAT_MEMORY_COLLECTION` | Mongo chat-memory archive collection, default `chat_memory`. |
+| `CHAT_MEMORY_MONGO_TTL_SECONDS` | Mongo chat-memory archive retention, default `7776000` (90 days). |
+| `CHAT_MEMORY_SYNC_INTERVAL_MS` | Redis→Mongo chat-memory sync interval, default `300000` (5 minutes). |
+| `CHAT_MEMORY_SYNC_BATCH_SIZE` | Redis SCAN count hint for chat-memory sync, default `100`. |
+| `KAFKA_BROKERS` | Comma-separated Kafka bootstrap brokers for chat-memory events. |
+| `KAFKA_CLIENT_ID` | Kafka client id, default `sql-agent`. |
+| `KAFKA_SSL` | Enables Kafka SSL when `true`. |
+| `KAFKA_SASL_MECHANISM` | Optional Kafka SASL mechanism, defaults to `plain` when username is set. |
+| `KAFKA_SASL_USERNAME` / `KAFKA_SASL_PASSWORD` | Optional Kafka SASL credentials. |
+| `CHAT_MEMORY_KAFKA_ENABLED` | Enables API-side chat-memory event publishing. |
+| `CHAT_MEMORY_KAFKA_TOPIC` | Chat-memory event topic, default `sql-agent.chat-memory.changed`. |
+| `CHAT_MEMORY_KAFKA_CONSUMER_GROUP` | Kafka archive worker group id. |
+| `CHAT_MEMORY_KAFKA_BATCH_SIZE` | Unique conversations per Kafka archive flush, default `500`. |
+| `CHAT_MEMORY_KAFKA_FLUSH_MS` | Max Kafka archive flush interval, default `5000`. |
 | `QDRANT_URL` | Qdrant HTTP URL for vector retrieval. Falls back to in-memory when unset. |
 | `QDRANT_API_KEY` | Qdrant API key for cloud/private clusters. |
 | `QDRANT_COLLECTION` | Qdrant collection name, default `semantic_metrics`. |
@@ -466,6 +528,30 @@ environment:
 `pino-pretty` is optional; development containers fall back to JSON logs if
 the pretty transport is not installed.
 
+Optional chat-memory sync worker in dashboard compose:
+
+```yaml
+sql-agent-chat-memory-kafka-sync:
+  build:
+    context: ../SQL_agent
+    dockerfile: Dockerfile
+  env_file:
+    - path: .env
+      required: false
+    - path: ../SQL_agent/.env
+      required: false
+  environment:
+    NODE_ENV: production
+  command: npm run sync:chat-memory:kafka
+  restart: unless-stopped
+  networks:
+    - saas-net
+```
+
+It needs the same Redis, Mongo, and Kafka env values as the API container. It
+exposes no ports and should run as a separate process/container. Keep
+`npm run sync:chat-memory` as a manual or low-frequency repair/backfill job.
+
 ## Tests
 
 ```bash
@@ -475,6 +561,8 @@ npm run test:execution    # execution-layer contracts
 npm run test:orchestrator # graph nodes + state
 npm run lint              # JSDoc type check via tsc --noEmit
 npm run seed:phase2d      # seed MongoDB + Qdrant semantic metrics
+npm run sync:chat-memory  # fallback/backfill Redis scan archive worker
+npm run sync:chat-memory:kafka # primary Kafka archive worker
 ```
 
 Tests use Node's built-in test runner; no mocha/jest dependency.

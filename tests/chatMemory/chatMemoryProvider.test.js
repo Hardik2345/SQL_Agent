@@ -10,6 +10,49 @@ import {
 
 const KEY = { brandId: 'BRAND', userId: 'u1', conversationId: 'c1' };
 
+class FakeRedisClient {
+  constructor(seed = {}) {
+    this.isOpen = false;
+    this.store = new Map(Object.entries(seed));
+    this.setCalls = [];
+  }
+
+  async connect() {
+    this.isOpen = true;
+  }
+
+  async get(key) {
+    return this.store.get(key) ?? null;
+  }
+
+  async set(key, value, options) {
+    this.setCalls.push({ key, value, options });
+    this.store.set(key, value);
+  }
+
+  async keys() {
+    return Array.from(this.store.keys());
+  }
+
+  async del(keys) {
+    for (const key of keys) this.store.delete(key);
+  }
+}
+
+const createArchive = (snapshot = null) => ({
+  lookups: 0,
+  async ensureIndexes() {},
+  async getSnapshot() {
+    this.lookups += 1;
+    return snapshot;
+  },
+  async upsertSnapshot() {},
+  async upsertSnapshots(items) {
+    return items.length;
+  },
+  async clear() {},
+});
+
 describe('chatMemory — normalize + merge helpers', () => {
   it('normalizes null/undefined into a fully-populated empty context', () => {
     const ctx = normalizeChatContext(null);
@@ -113,5 +156,85 @@ describe('createChatMemoryProvider — env-driven default', () => {
   it('falls back to in-memory when REDIS_URL is unset', async () => {
     const p = await createChatMemoryProvider({ url: '' });
     assert.equal(p.mock, true);
+  });
+});
+
+describe('chatMemory — Redis provider with Mongo fallback', () => {
+  it('returns Redis hit before checking Mongo archive', async () => {
+    const redis = new FakeRedisClient({
+      'sql-agent:chat:BRAND:u1:c1': JSON.stringify({ previousQuestions: ['redis'] }),
+    });
+    const archive = createArchive({ previousQuestions: ['mongo'] });
+    const provider = await _internal.createRedisChatMemoryProvider({
+      url: 'redis://fake',
+      ttlSeconds: 60,
+      client: redis,
+      archive,
+    });
+
+    const ctx = await provider.getChatContext(KEY);
+    assert.deepEqual(ctx.previousQuestions, ['redis']);
+    assert.equal(archive.lookups, 0);
+  });
+
+  it('uses Mongo fallback on Redis miss and rehydrates Redis', async () => {
+    const redis = new FakeRedisClient();
+    const archive = createArchive({ previousQuestions: ['mongo'], lastMetricRefs: ['gross_sales'] });
+    const provider = await _internal.createRedisChatMemoryProvider({
+      url: 'redis://fake',
+      ttlSeconds: 60,
+      client: redis,
+      archive,
+    });
+
+    const ctx = await provider.getChatContext(KEY);
+    assert.deepEqual(ctx.previousQuestions, ['mongo']);
+    assert.deepEqual(ctx.lastMetricRefs, ['gross_sales']);
+    assert.equal(archive.lookups, 1);
+    assert.equal(redis.setCalls.length, 1);
+    assert.equal(redis.setCalls[0].key, 'sql-agent:chat:BRAND:u1:c1');
+    assert.deepEqual(redis.setCalls[0].options, { EX: 60 });
+  });
+
+  it('returns normalized empty context when Redis and Mongo miss', async () => {
+    const redis = new FakeRedisClient();
+    const archive = createArchive(null);
+    const provider = await _internal.createRedisChatMemoryProvider({
+      url: 'redis://fake',
+      ttlSeconds: 60,
+      client: redis,
+      archive,
+    });
+
+    const ctx = await provider.getChatContext(KEY);
+    assert.deepEqual(ctx.previousQuestions, []);
+    assert.deepEqual(ctx.confirmedMetricDefinitions, {});
+  });
+
+  it('publishes a Kafka change event after Redis update', async () => {
+    const redis = new FakeRedisClient();
+    const calls = [];
+    const provider = await _internal.createRedisChatMemoryProvider({
+      url: 'redis://fake',
+      ttlSeconds: 60,
+      client: redis,
+      archive: null,
+      kafkaProducer: {
+        enabled: true,
+        publishChanged: async (key) => {
+          calls.push(key);
+          return true;
+        },
+        disconnect: async () => {},
+      },
+    });
+
+    await provider.updateChatContext({
+      ...KEY,
+      memoryDelta: { previousQuestions: ['hello?'] },
+    });
+
+    assert.equal(calls.length, 1);
+    assert.deepEqual(calls[0], KEY);
   });
 });

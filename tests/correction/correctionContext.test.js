@@ -38,6 +38,8 @@ const samplePlan = {
   intent: 'metric_over_time',
   targetTables: ['orders'],
   requiredMetrics: ['order_count'],
+  resultShape: 'time_series',
+  dimensions: ['date'],
   filters: [],
   timeGrain: 'day',
   notes: 'ok',

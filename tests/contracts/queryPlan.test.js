@@ -10,6 +10,8 @@ describe('QueryPlan contract — Phase 2B widening', () => {
       intent: 'metric_over_time',
       targetTables: ['gross_summary'],
       requiredMetrics: ['gross_sales'],
+      resultShape: 'time_series',
+      dimensions: ['date'],
       filters: ['last 30 days'],
       timeGrain: 'day',
       notes: 'ok',
@@ -27,6 +29,8 @@ describe('QueryPlan contract — Phase 2B widening', () => {
     });
     assert.equal(plan.status, 'ready');
     assert.equal(plan.clarificationQuestion, null);
+    assert.equal(plan.resultShape, 'time_series');
+    assert.deepEqual(plan.dimensions, ['date']);
     assert.equal(plan.assumptions.length, 1);
     assert.equal(plan.metricDefinitions.length, 1);
     assert.equal(plan.metricDefinitions[0].source, 'global_context');
@@ -40,6 +44,8 @@ describe('QueryPlan contract — Phase 2B widening', () => {
     });
     assert.equal(plan.status, 'ready');
     assert.equal(plan.clarificationQuestion, null);
+    assert.equal(plan.resultShape, 'single_aggregate');
+    assert.deepEqual(plan.dimensions, []);
     assert.deepEqual(plan.assumptions, []);
     assert.deepEqual(plan.metricDefinitions, []);
   });
@@ -49,6 +55,8 @@ describe('QueryPlan contract — Phase 2B widening', () => {
       intent: 'metric_calculation',
       targetTables: [],
       requiredMetrics: ['cancellation_rate'],
+      resultShape: 'single_aggregate',
+      dimensions: [],
       filters: [],
       notes: 'cancellation_rate definition not provided',
       status: 'needs_clarification',
@@ -67,6 +75,8 @@ describe('QueryPlan contract — Phase 2B widening', () => {
       intent: 'chat_metric_definition',
       targetTables: [],
       requiredMetrics: [],
+      resultShape: 'detail_rows',
+      dimensions: [],
       filters: [],
       notes: 'store chat-scoped metric definition',
       status: 'memory_update',
@@ -95,6 +105,42 @@ describe('QueryPlan contract — Phase 2B widening', () => {
           targetTables: [],
           requiredMetrics: ['x'],
           status: 'ready',
+        }),
+      (err) => err instanceof ContractError,
+    );
+  });
+
+  it('rejects single_aggregate plans with dimensions', () => {
+    assert.throws(
+      () =>
+        assertQueryPlan({
+          intent: 'metric_calculation',
+          targetTables: ['gross_summary'],
+          requiredMetrics: ['gross_sales'],
+          resultShape: 'single_aggregate',
+          dimensions: ['date'],
+          status: 'ready',
+          clarificationQuestion: null,
+          assumptions: [],
+          metricDefinitions: [],
+        }),
+      (err) => err instanceof ContractError,
+    );
+  });
+
+  it('rejects time_series plans without dimensions', () => {
+    assert.throws(
+      () =>
+        assertQueryPlan({
+          intent: 'metric_over_time',
+          targetTables: ['gross_summary'],
+          requiredMetrics: ['gross_sales'],
+          resultShape: 'time_series',
+          dimensions: [],
+          status: 'ready',
+          clarificationQuestion: null,
+          assumptions: [],
+          metricDefinitions: [],
         }),
       (err) => err instanceof ContractError,
     );

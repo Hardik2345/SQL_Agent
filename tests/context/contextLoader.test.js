@@ -174,6 +174,8 @@ describe('memoryExtractor', () => {
     intent: 'metric_over_time',
     targetTables: ['orders'],
     requiredMetrics: ['order_count'],
+    resultShape: 'time_series',
+    dimensions: ['date'],
     filters: ['status = paid'],
     timeGrain: 'day',
     notes: '',

@@ -37,6 +37,8 @@ be `}`.
   "intent": "string — short classification, e.g. 'metric_over_time', 'top_n', 'comparison', 'metric_calculation', 'chat_metric_definition', 'unanswerable'",
   "targetTables": ["table_name", "..."],
   "requiredMetrics": ["metric_name", "..."],
+  "resultShape": "single_aggregate | time_series | grouped_breakdown | detail_rows",
+  "dimensions": ["dimension_or_time_bucket", "..."],
   "filters": ["optional plain-language filter hint", "..."],
   "timeGrain": "day|week|month|quarter|year",
   "notes": "optional planner rationale + ambiguity notes (max 4000 chars)",
@@ -77,22 +79,30 @@ be `}`.
    "cancellation rate", "conversion rate", "AOV", "retention",
    "churn"), set `status` to `"needs_clarification"` instead of
    guessing.
-5. **Prefer fewer tables.** If the question can be answered using a
+5. **Clarify vague user wording.** If any important part of the
+   request is vague, misspelled but inferable, or has multiple valid
+   interpretations, set `status` to `"needs_clarification"` instead of
+   choosing one silently. This includes ambiguous relative time windows
+   such as "last 3 days", "past week", "recent", "this month so far",
+   or "yesterday vs last completed day" when the user has not specified
+   whether the range includes today/current partial period or only
+   completed periods.
+6. **Prefer fewer tables.** If the question can be answered using a
    single table, use exactly one. Only choose multiple tables when the
    question genuinely requires data spanning them.
-6. **Express assumptions explicitly.** Any default you pick (time
+7. **Express assumptions explicitly.** Any default you pick (time
    range, metric choice when synonyms exist, etc.) must appear in
    `assumptions[]` AND in `notes`. Do NOT add an entry to
    `assumptions[]` unless it is grounded in something you actually
    read from the provided context — if you would have to guess, that's
    `needs_clarification` instead.
-7. **Surface used metric definitions.** Whenever your plan relies on a
+8. **Surface used metric definitions.** Whenever your plan relies on a
    formula from `Known metric definitions` or
    `Confirmed metric definitions`, include the matching
    `MetricDefinition` entry (with `source` set correctly) in
    `metricDefinitions`. This lets downstream nodes audit which
    formulas a query uses.
-8. **Separate memory updates from queries.** If the user is defining or
+9. **Separate memory updates from queries.** If the user is defining or
    correcting a metric for this chat/conversation rather than asking for
    data, return `status: "memory_update"` and do not choose tables.
 
@@ -110,6 +120,12 @@ Return `status: "needs_clarification"` when ANY of the following holds:
   and `net_sales`).
 - Two or more metric synonyms map to different schema columns and the
   context does not pick one.
+- The question uses vague or underspecified wording that affects the
+  query result. In particular, relative date ranges MUST be clarified
+  when inclusion is unclear. Example: for "show me sales for last 3
+  days" or "sales for lst 3 days", ask whether the user means the last
+  3 calendar days including today/current partial day, or the last 3
+  completed days excluding today.
 
 When returning `"needs_clarification"`:
 
@@ -121,6 +137,10 @@ When returning `"needs_clarification"`:
   alternatives when possible. Example: *"How should cancellation rate
   be calculated: cancelled orders / total orders, cancelled revenue /
   gross revenue, or another formula?"*
+- For ambiguous date ranges, the clarification question MUST name the
+  concrete alternatives, e.g. *"Should 'last 3 days' include today
+  so far, or should it mean the last 3 completed days excluding
+  today?"*
 - `assumptions` and `metricDefinitions` should be empty unless the
   question is partly answerable.
 
@@ -140,8 +160,9 @@ Examples:
 For `memory_update`:
 
 - Set `intent` to `"chat_metric_definition"`.
-- Set `targetTables`, `requiredMetrics`, `filters`, `assumptions`, and
-  `metricDefinitions` to empty arrays.
+- Set `targetTables`, `requiredMetrics`, `dimensions`, `filters`,
+  `assumptions`, and `metricDefinitions` to empty arrays.
+- Set `resultShape` to `"detail_rows"`.
 - Set `clarificationQuestion` to `null`.
 - Put the normalized snake_case metric name and formula in
   `memoryUpdates.confirmedMetricDefinitions`.
@@ -157,6 +178,7 @@ Return `status: "ready"` only when:
 
 - Every `requiredMetric` has a column in `targetTables` OR a formula
   available in the provided context.
+- `resultShape` correctly describes the requested output shape.
 - All defaults you applied are recorded in `assumptions` and `notes`.
 - `clarificationQuestion` is `null`.
 
@@ -166,6 +188,21 @@ Return `status: "ready"` only when:
   values when applicable, or coin a new one (still snake_case).
 - `requiredMetrics` — names of measures the answer needs. For pure
   dimension lookups (e.g., "list of products") leave empty.
+- `resultShape` — choose exactly one:
+  - `single_aggregate`: one summarized row. Use when the user asks
+    "total", "overall", "sum", "how much", "how many", etc. without
+    requesting "by day", "by product", or another breakdown.
+  - `time_series`: aggregate grouped by a time bucket. Use only when
+    the user asks for a trend or explicitly says by day/week/month/hour,
+    daily, weekly, monthly, etc.
+  - `grouped_breakdown`: aggregate grouped by one or more non-time
+    dimensions, e.g. by product, channel, city, category.
+  - `detail_rows`: raw/listed records, e.g. list orders, show
+    transactions, last 20 rows.
+- `dimensions` — grouping/detail dimensions requested by the user.
+  For `single_aggregate`, this MUST be empty. For `time_series`, include
+  the time bucket (e.g. `date`, `hour`, `month`). For grouped breakdowns,
+  include the requested non-time dimensions.
 - `filters` — plain-language hints only. No SQL fragments. Examples:
   "status equals 'paid'", "last 30 days".
 - `timeGrain` — only set when the question implies a time series.

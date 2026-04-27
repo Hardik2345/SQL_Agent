@@ -60,6 +60,8 @@ const mockPlan = () =>
     intent: 'analytics_query',
     targetTables: ['gross_summary'],
     requiredMetrics: ['gross_sales'],
+    resultShape: 'time_series',
+    dimensions: ['date'],
     filters: [],
     timeGrain: 'day',
     notes: '[mock planner] deterministic plan (PLANNER_MODE=mock)',

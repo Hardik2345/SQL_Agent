@@ -32,6 +32,8 @@ const readyPlan = {
   intent: 'metric_over_time',
   targetTables: ['gross_summary'],
   requiredMetrics: ['gross_sales'],
+  resultShape: 'time_series',
+  dimensions: ['date'],
   filters: [],
   timeGrain: 'day',
   notes: 'ok',
