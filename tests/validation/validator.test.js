@@ -143,6 +143,18 @@ describe('validator', () => {
     assert.ok(codes(result).includes(VALIDATION_CODES.COLUMN_NOT_ALLOWED));
   });
 
+  it('rejects unqualified spaced identifiers not present in any allowed table', () => {
+    // Regression: LLM hallucinated `product id` (with a space) instead of
+    // `product_id`. Previously this bypassed validation and only failed at
+    // DB execution with E_EXECUTION / ER_BAD_FIELD_ERROR.
+    const result = validate({
+      sql: 'SELECT `date` FROM orders WHERE `product id` = "8547284648132" LIMIT 1',
+      schema,
+    });
+    assert.equal(result.valid, false);
+    assert.ok(codes(result).includes(VALIDATION_CODES.COLUMN_NOT_ALLOWED));
+  });
+
   it('flags GROUP BY violations', () => {
     const result = validate({
       sql: 'SELECT status, id FROM orders GROUP BY status LIMIT 10',

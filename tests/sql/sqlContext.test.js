@@ -216,4 +216,31 @@ describe('buildSqlSchemaDigest', () => {
     assert.match(digest, /customers:/);
     assert.match(digest, /unrelated:/);
   });
+
+  it('annotates curated analytics tables with responsibility metadata', () => {
+    const shopifySchema = {
+      ...schemaContext,
+      tables: {
+        shopify_orders: {
+          name: 'shopify_orders',
+          columns: {
+            order_id: { name: 'order_id', type: 'varchar(50)', nullable: true, defaultValue: null, isPrimaryKey: false, isForeignKey: false, references: null },
+            product_id: { name: 'product_id', type: 'varchar(50)', nullable: true, defaultValue: null, isPrimaryKey: false, isForeignKey: false, references: null },
+            financial_status: { name: 'financial_status', type: 'varchar(50)', nullable: true, defaultValue: null, isPrimaryKey: false, isForeignKey: false, references: null },
+          },
+          primaryKey: [],
+          foreignKeys: [],
+        },
+      },
+      allowedTables: ['shopify_orders'],
+      allowedColumns: {
+        shopify_orders: ['order_id', 'product_id', 'financial_status'],
+      },
+    };
+
+    const digest = buildSqlSchemaDigest(shopifySchema, ['shopify_orders']);
+    assert.match(digest, /shopify_orders:/);
+    assert.match(digest, /grain=order line item/);
+    assert.match(digest, /COUNT\(DISTINCT order_id\)/);
+  });
 });

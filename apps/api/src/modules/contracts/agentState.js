@@ -23,6 +23,10 @@ import { AGENT_STATUS } from '../../utils/constants.js';
  * @property {Record<string, string>} [glossary]
  * @property {Record<string, string>} [synonyms]
  *
+ * @typedef {Object} PendingClarification
+ * @property {string} originalQuestion  The user question that triggered needs_clarification.
+ * @property {string} clarificationQuestion  The question the agent asked back.
+ *
  * @typedef {Object} ChatContext
  * @property {string[]}                       [previousQuestions]
  * @property {Record<string, string>}         [confirmedMetricDefinitions]
@@ -30,6 +34,7 @@ import { AGENT_STATUS } from '../../utils/constants.js';
  * @property {string|null}                    [lastResultSummary]
  * @property {string[]}                       [lastMetricRefs]
  * @property {Array<Record<string, unknown>>} [lastFilterRefs]
+ * @property {PendingClarification|null}      [pendingClarification]
  */
 
 /**

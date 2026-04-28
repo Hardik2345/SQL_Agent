@@ -31,6 +31,7 @@ import { createChatMemoryKafkaProducer } from './chatMemoryKafkaProducer.js';
  */
 export const normalizeChatContext = (value) => {
   const v = value && typeof value === 'object' ? value : {};
+  const pc = v.pendingClarification;
   return {
     previousQuestions: Array.isArray(v.previousQuestions) ? v.previousQuestions.slice() : [],
     confirmedMetricDefinitions:
@@ -42,6 +43,10 @@ export const normalizeChatContext = (value) => {
       typeof v.lastResultSummary === 'string' ? v.lastResultSummary : null,
     lastMetricRefs: Array.isArray(v.lastMetricRefs) ? v.lastMetricRefs.slice() : [],
     lastFilterRefs: Array.isArray(v.lastFilterRefs) ? v.lastFilterRefs.slice() : [],
+    pendingClarification:
+      pc && typeof pc.originalQuestion === 'string' && typeof pc.clarificationQuestion === 'string'
+        ? { originalQuestion: pc.originalQuestion, clarificationQuestion: pc.clarificationQuestion }
+        : null,
   };
 };
 
@@ -75,6 +80,15 @@ export const mergeChatContext = (existing, delta) => {
     next.lastResultSummary = typeof delta.lastResultSummary === 'string'
       ? delta.lastResultSummary
       : null;
+  }
+  // pendingClarification: explicit null clears it (used after a follow-up resolves it);
+  // a defined object sets it; undefined leaves the existing value.
+  if ('pendingClarification' in delta) {
+    const pc = delta.pendingClarification;
+    next.pendingClarification =
+      pc && typeof pc.originalQuestion === 'string' && typeof pc.clarificationQuestion === 'string'
+        ? { originalQuestion: pc.originalQuestion, clarificationQuestion: pc.clarificationQuestion }
+        : null;
   }
   return next;
 };

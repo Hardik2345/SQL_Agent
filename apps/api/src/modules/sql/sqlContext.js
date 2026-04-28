@@ -1,3 +1,5 @@
+import { formatTableMetadata } from '../schema/tableMetadata.js';
+
 /**
  * SQL generator context builder.
  *
@@ -62,7 +64,12 @@ export const buildSqlSchemaDigest = (schemaContext, targetTables) => {
     const colTokens = Object.values(t.columns).map(
       (c) => `${c.name}(${c.type})`,
     );
-    lines.push(`${tableName}: ${colTokens.join(', ')}`);
+    const metadata = formatTableMetadata(tableName);
+    lines.push(
+      metadata
+        ? `${tableName}: ${colTokens.join(', ')} -- ${metadata}`
+        : `${tableName}: ${colTokens.join(', ')}`,
+    );
   }
   return lines.join('\n');
 };

@@ -134,13 +134,15 @@ describe('plan.node — llm mode (structured output)', () => {
     assert.equal(system.role, 'system');
     assert.equal(user.role, 'user');
 
-    // The user message must contain the schema digest with at least one
-    // real table name from the dump and the question itself.
+    // The user message must contain the curated planner schema digest
+    // with table responsibility metadata and the question itself.
     assert.match(user.content, /Question: How many gross sales per day\?/);
-    assert.match(user.content, /\bgross_summary\b/);
-    assert.match(user.content, /\bdiscount_summary\b/);
+    assert.match(user.content, /\bshopify_orders\b/);
+    assert.match(user.content, /grain=order line item/);
+    assert.doesNotMatch(user.content, /\bgross_summary\b/);
+    assert.doesNotMatch(user.content, /\bdiscount_summary\b/);
     // Column types should be rendered in the digest format.
-    assert.match(user.content, /date\(date\)/);
+    assert.match(user.content, /created_at\(datetime\)/);
 
     // The system prompt must forbid SQL generation.
     assert.match(system.content, /No SQL/i);
@@ -329,6 +331,58 @@ describe('plan.node — Phase 2B clarification handling', () => {
     // chat-confirmed formula should appear; original global formula
     // should be superseded in the merged knownMetrics block.
     assert.match(userMessage.content, /cancelled_revenue \/ gross_revenue/);
+  });
+
+  it('supports saving a pending clarification answer as a memory update', async () => {
+    /** @type {Array<{role:string, content:string}> | null} */
+    let captured = null;
+    const llm = makeFakeLlm((messages) => {
+      captured = messages;
+      return {
+        intent: 'chat_metric_definition',
+        targetTables: [],
+        requiredMetrics: [],
+        resultShape: 'detail_rows',
+        dimensions: [],
+        filters: [],
+        timeGrain: null,
+        notes: 'User confirmed conversion_rate means orders / sessions and asked to remember it.',
+        status: 'memory_update',
+        clarificationQuestion: null,
+        assumptions: [],
+        metricDefinitions: [],
+        memoryUpdates: {
+          confirmedMetricDefinitions: {
+            conversion_rate: 'orders / sessions',
+          },
+        },
+      };
+    });
+    const plan = createPlanNode({ mode: 'llm', llm });
+    const state = baseState(schemaContext, 'Yes that is correct, remember it');
+    state.chatContext = {
+      pendingClarification: {
+        originalQuestion:
+          'What is the conversion rate of the product id 8547284648132 in the last 30 days.',
+        clarificationQuestion:
+          'How should conversion rate be calculated: orders / sessions, or another formula?',
+      },
+    };
+
+    const patch = await plan(state);
+
+    assert.equal(patch.status, AGENT_STATUS.MEMORY_UPDATE_REQUIRED);
+    assert.equal(patch.plan.status, 'memory_update');
+    assert.equal(
+      patch.plan.memoryUpdates.confirmedMetricDefinitions.conversion_rate,
+      'orders / sessions',
+    );
+    const systemMessage = captured.find((m) => m.role === 'system');
+    const userMessage = captured.find((m) => m.role === 'user');
+    assert.match(systemMessage.content, /remember it/i);
+    assert.match(systemMessage.content, /memory_update/);
+    assert.match(userMessage.content, /Pending clarification/);
+    assert.match(userMessage.content, /orders \/ sessions/);
   });
 });
 

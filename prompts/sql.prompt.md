@@ -17,7 +17,8 @@ You receive these blocks in the user message:
   columns (name + MySQL type) and primary key.
 - `AllowedColumns`: a `{ table: [columns…] }` map for the same tables.
 - `Schema digest`: a compact `table: col(type), …` rendering of the
-  same information for quick reference.
+  same information for quick reference. Lines may include
+  `grain`, `responsibility`, `use_for`, and `avoid` metadata.
 
 The `Tables` / `AllowedColumns` lists are the entire universe of
 tables and columns you may reference. Anything not in those lists
@@ -59,6 +60,18 @@ be `}`.
    `Tables`. Every column you reference (qualified or unqualified)
    MUST appear in the corresponding table's column list. Do not
    invent columns or tables.
+   Treat schema metadata (`grain`, `responsibility`, `use_for`,
+   `avoid`) as authoritative business grounding. If the table is
+   line-item grain, do not count rows as orders; use a distinct entity
+   key such as `COUNT(DISTINCT order_id)` for order-level metrics.
+   **No silent column remapping.** If the plan's `filters` reference
+   an entity (e.g. `product_id = 8547284648132`) but the chosen table
+   has no such column, do NOT remap the filter value onto a different
+   column (e.g. do NOT write `utm_campaign = '8547284648132'`). That
+   is a schema violation. Instead return the empty-sql failure mode
+   with a rationale naming the missing column, so the orchestrator
+   can surface the error cleanly rather than executing a silently
+   wrong query.
 8. **Plan fidelity.** Use the planner's `targetTables` as your table
    list. If `metricDefinitions` are present, implement those formulas
    **exactly** — do not substitute alternatives. Respect `filters`
@@ -109,24 +122,55 @@ prefer `single_aggregate` over `timeGrain`.
 
 ## When the plan is `metricDefinitions`-grounded
 
-If `Plan.metricDefinitions` contains a `formula`, the SQL **must
-implement that formula literally**. Do not improvise an equivalent
-form. The formula is the user's confirmed business definition; any
-substitution is a contract violation.
+If `Plan.metricDefinitions` contains a `formula`, that formula
+describes the **business logic** (numerator / denominator) but its
+terms may be conceptual names, not literal column names.
 
-Example:
+**Step 1 — Check whether the formula terms are actual column names.**
+Look each term up in `AllowedColumns` for the target table.
 
-```
-metricDefinitions: [
-  { "name": "cancellation_rate",
-    "formula": "cancelled_orders / total_orders",
-    "source": "global_context" }
-]
-```
+- If they **are** real columns → use them directly.
+- If they are **not** real columns (e.g. `"cancelled orders"`,
+  `"total orders"`) → treat them as semantic descriptions and map each
+  operand to the correct SQL expression using columns that actually
+  exist in the table.
 
-→ The SQL must compute exactly `cancelled_orders / total_orders` (or
-the column expressions implementing those operands), not `1 - paid /
-total` or any other algebraic equivalent.
+**Step 2 — Apply the structure of the formula.**
+The ratio / aggregation structure of the stored formula is
+authoritative. Do not invent a different formula. But each operand
+must be expressed via real columns.
+
+Example — formula `"cancelled orders / total orders"` on `shopify_orders`:
+
+`shopify_orders` is **line-item grain** (one row per order × product).
+`financial_status` is an order-level attribute repeated on every line
+item for that order. `COUNT(*)` counts line items, not orders — use
+`COUNT(DISTINCT order_id)` as the denominator, and
+`COUNT(DISTINCT CASE WHEN ... THEN order_id END)` as the numerator,
+so multi-product orders are not double-counted.
+
+- `cancelled orders` → `COUNT(DISTINCT CASE WHEN financial_status IN ('cancelled','voided') THEN order_id END)`
+- `total orders` → `COUNT(DISTINCT order_id)`
+- Result: `COUNT(DISTINCT CASE WHEN financial_status IN ('cancelled','voided') THEN order_id END) / COUNT(DISTINCT order_id)`
+
+Do **not** write `cancelled_orders / total_orders` if those column
+names do not appear in `AllowedColumns` — that is a hallucination.
+
+## When there is NO `metricDefinitions` formula
+
+If `Plan.metricDefinitions` is empty or the metric has no `formula`
+field, you must derive the metric **only from columns that actually
+exist in `AllowedColumns`**. Do not guess or invent column names.
+
+Common derivations on `shopify_orders` (line-item grain — use DISTINCT order_id, not COUNT(*)):
+- Cancellation / order-wise cancellation: `COUNT(DISTINCT CASE WHEN financial_status IN ('cancelled','voided') THEN order_id END) / COUNT(DISTINCT order_id)`
+- Refund rate: `COUNT(DISTINCT CASE WHEN financial_status = 'refunded' THEN order_id END) / COUNT(DISTINCT order_id)`
+- Paid orders: `COUNT(DISTINCT CASE WHEN financial_status = 'paid' THEN order_id END)`
+
+If you cannot express the metric using columns that exist in the
+chosen table, return the empty-sql failure mode with a rationale — do
+not hallucinate column names like `cancelled_orders` on a table that
+only has `financial_status`.
 
 ## Failure mode
 

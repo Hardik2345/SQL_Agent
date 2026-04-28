@@ -215,6 +215,72 @@ export const httpStatusForState = (finalState) => {
 };
 
 /**
+ * Write pendingClarification into chat memory when the planner asks a
+ * clarification question, so the next user message can be fused with
+ * the original question.
+ *
+ * @param {import('../modules/contracts/agentState.js').AgentState} finalState
+ */
+const writePendingClarification = async (finalState) => {
+  if (finalState?.plan?.status !== 'needs_clarification') return;
+  const clarificationQuestion = finalState.plan.clarificationQuestion;
+  if (!clarificationQuestion) return;
+  const originalQuestion = finalState.request?.question;
+  if (!originalQuestion) return;
+
+  try {
+    const provider = await getMemoryProvider();
+    const ctx = finalState.request?.context ?? {};
+    await provider.updateChatContext({
+      brandId: finalState.tenant.brandId,
+      userId: typeof ctx.userId === 'string' ? ctx.userId : 'anonymous',
+      conversationId: typeof ctx.conversationId === 'string' ? ctx.conversationId : 'default',
+      memoryDelta: {
+        previousQuestions: [originalQuestion],
+        pendingClarification: { originalQuestion, clarificationQuestion },
+      },
+    });
+  } catch (err) {
+    logger.warn(
+      {
+        event: 'controller.pending_clarification_write.failed',
+        correlationId: finalState?.correlationId,
+        message: err instanceof Error ? err.message : String(err),
+      },
+      'pending clarification write failed (swallowed)',
+    );
+  }
+};
+
+/**
+ * Clear pendingClarification from chat memory once the user answers and
+ * a non-clarification plan is produced.
+ *
+ * @param {import('../modules/contracts/agentState.js').AgentState} finalState
+ */
+const clearPendingClarification = async (finalState) => {
+  if (finalState?.plan?.status === 'needs_clarification') return;
+  try {
+    const provider = await getMemoryProvider();
+    const ctx = finalState.request?.context ?? {};
+    const chatCtx = await provider.getChatContext({
+      brandId: finalState.tenant.brandId,
+      userId: typeof ctx.userId === 'string' ? ctx.userId : 'anonymous',
+      conversationId: typeof ctx.conversationId === 'string' ? ctx.conversationId : 'default',
+    });
+    if (!chatCtx.pendingClarification) return;
+    await provider.updateChatContext({
+      brandId: finalState.tenant.brandId,
+      userId: typeof ctx.userId === 'string' ? ctx.userId : 'anonymous',
+      conversationId: typeof ctx.conversationId === 'string' ? ctx.conversationId : 'default',
+      memoryDelta: { pendingClarification: null },
+    });
+  } catch (_err) {
+    // Non-critical — best effort clear
+  }
+};
+
+/**
  * POST /insights/query handler.
  *
  * Assumptions: tenantContextMiddleware has already populated
@@ -251,6 +317,11 @@ export const queryInsight = async (req, res) => {
     const finalState = await runGraph({ correlationId, request, tenant });
     if (finalState.plan?.status === 'memory_update') {
       await writePlannerMemoryUpdate(finalState);
+    }
+    if (finalState.plan?.status === 'needs_clarification') {
+      await writePendingClarification(finalState);
+    } else {
+      clearPendingClarification(finalState).catch(() => {});
     }
     const response = buildResponseFromState(finalState, correlationId, log);
     // Fire-and-forget. Memory write failure must not affect the

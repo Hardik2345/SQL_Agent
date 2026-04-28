@@ -38,6 +38,7 @@ export const getPoolForTenant = (tenant) => {
     typeCast: true,
     enableKeepAlive: true,
     keepAliveInitialDelay: 10_000,
+    ...(env.execution.ssl ? { ssl: { rejectUnauthorized: true } } : {}),
   });
 
   pools.set(tenant.poolKey, pool);

@@ -50,6 +50,7 @@ export const env = Object.freeze({
     maxRows: toInt(process.env.EXEC_MAX_ROWS, 10000),
     poolConnectionLimit: toInt(process.env.POOL_CONNECTION_LIMIT, 10),
     poolIdleTimeoutMs: toInt(process.env.POOL_IDLE_TIMEOUT_MS, 600000),
+    ssl: toBool(process.env.MYSQL_SSL, false),
   }),
 
   llm: Object.freeze({

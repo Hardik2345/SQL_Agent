@@ -24,6 +24,40 @@ const minimalSchemaContext = {
   allowedJoins: [],
 };
 
+/** @type {import('../../apps/api/src/modules/schema/schema.types.js').SchemaContext} */
+const curatedSchemaContext = {
+  ...minimalSchemaContext,
+  tables: {
+    ...minimalSchemaContext.tables,
+    shopify_orders: {
+      name: 'shopify_orders',
+      columns: {
+        order_id: { name: 'order_id', type: 'varchar(50)', nullable: true, defaultValue: null, isPrimaryKey: false, isForeignKey: false, references: null },
+        product_id: { name: 'product_id', type: 'varchar(50)', nullable: true, defaultValue: null, isPrimaryKey: false, isForeignKey: false, references: null },
+        financial_status: { name: 'financial_status', type: 'varchar(50)', nullable: true, defaultValue: null, isPrimaryKey: false, isForeignKey: false, references: null },
+        created_at: { name: 'created_at', type: 'datetime', nullable: true, defaultValue: null, isPrimaryKey: false, isForeignKey: false, references: null },
+      },
+      primaryKey: [],
+      foreignKeys: [],
+    },
+    gross_summary: {
+      name: 'gross_summary',
+      columns: {
+        date: { name: 'date', type: 'date', nullable: true, defaultValue: null, isPrimaryKey: false, isForeignKey: false, references: null },
+        gross_sales: { name: 'gross_sales', type: 'float', nullable: true, defaultValue: null, isPrimaryKey: false, isForeignKey: false, references: null },
+      },
+      primaryKey: [],
+      foreignKeys: [],
+    },
+  },
+  allowedTables: ['orders', 'shopify_orders', 'gross_summary'],
+  allowedColumns: {
+    orders: ['id', 'status'],
+    shopify_orders: ['order_id', 'product_id', 'financial_status', 'created_at'],
+    gross_summary: ['date', 'gross_sales'],
+  },
+};
+
 describe('buildPlannerContext', () => {
   it('produces question + schema digest from minimal inputs', () => {
     const ctx = buildPlannerContext({
@@ -36,6 +70,19 @@ describe('buildPlannerContext', () => {
     assert.deepEqual(ctx.glossary, {});
     assert.deepEqual(ctx.previousQuestions, []);
     assert.deepEqual(ctx.confirmedDefinitions, {});
+  });
+
+  it('curates planner schema to the analytics table surface when available', () => {
+    const ctx = buildPlannerContext({
+      request: { brandId: 'B', question: 'cancellation rate for product 1' },
+      schemaContext: curatedSchemaContext,
+    });
+
+    assert.match(ctx.schemaDigest, /^shopify_orders:/);
+    assert.match(ctx.schemaDigest, /grain=order line item/);
+    assert.match(ctx.schemaDigest, /COUNT\(DISTINCT order_id\)/);
+    assert.ok(!ctx.schemaDigest.includes('gross_summary:'));
+    assert.doesNotMatch(ctx.schemaDigest, /^orders:/m);
   });
 
   it('merges global metric definitions with chat confirmations (chat wins on conflict)', () => {

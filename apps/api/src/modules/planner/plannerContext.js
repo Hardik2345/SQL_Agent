@@ -25,6 +25,7 @@
  * @property {Record<string, string>}                  glossary              Brand glossary terms.
  * @property {string[]}                                previousQuestions     Up to N most-recent prior questions.
  * @property {Record<string, string>}                  confirmedDefinitions  User-confirmed metric formulas.
+ * @property {{ originalQuestion: string, clarificationQuestion: string }|null} pendingClarification  Set when the previous response was needs_clarification.
  *
  * @typedef {Object} KnownMetric
  * @property {string}                       name
@@ -33,6 +34,8 @@
  * @property {string[]}                     [synonyms]
  * @property {'global_context'|'chat_context'} source
  */
+
+import { formatTableMetadata, getPlannerVisibleTables } from '../schema/tableMetadata.js';
 
 const MAX_PREVIOUS_QUESTIONS = 5;
 
@@ -45,13 +48,18 @@ const MAX_PREVIOUS_QUESTIONS = 5;
  */
 const buildSchemaDigest = (schemaContext) => {
   const lines = [];
-  for (const tableName of schemaContext.allowedTables) {
+  for (const tableName of getPlannerVisibleTables(schemaContext)) {
     const t = schemaContext.tables[tableName];
     if (!t) continue;
     const colTokens = Object.values(t.columns).map(
       (c) => `${c.name}(${c.type})`,
     );
-    lines.push(`${tableName}: ${colTokens.join(', ')}`);
+    const metadata = formatTableMetadata(tableName);
+    lines.push(
+      metadata
+        ? `${tableName}: ${colTokens.join(', ')} -- ${metadata}`
+        : `${tableName}: ${colTokens.join(', ')}`,
+    );
   }
   return lines.join('\n');
 };
@@ -137,6 +145,12 @@ export const buildPlannerContext = ({
 
   const confirmedDefinitions = { ...(chatContext?.confirmedMetricDefinitions ?? {}) };
 
+  const pc = chatContext?.pendingClarification ?? null;
+  const pendingClarification =
+    pc && typeof pc.originalQuestion === 'string' && typeof pc.clarificationQuestion === 'string'
+      ? { originalQuestion: pc.originalQuestion, clarificationQuestion: pc.clarificationQuestion }
+      : null;
+
   return {
     question: request.question,
     schemaDigest,
@@ -144,6 +158,7 @@ export const buildPlannerContext = ({
     glossary,
     previousQuestions,
     confirmedDefinitions,
+    pendingClarification,
   };
 };
 

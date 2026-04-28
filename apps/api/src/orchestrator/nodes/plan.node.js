@@ -106,7 +106,7 @@ const buildUserMessage = (ctx) => {
   const sections = [`Question: ${ctx.question}`];
 
   if (ctx.schemaDigest) {
-    sections.push('', 'Schema (table: col(type), ...):', ctx.schemaDigest);
+    sections.push('', 'Schema (table: col(type), ... -- grain/responsibility/use_for/avoid):', ctx.schemaDigest);
   }
 
   // Only include the contextual blocks when they have content. The
@@ -142,6 +142,19 @@ const buildUserMessage = (ctx) => {
       '',
       'Recent questions in this conversation (for continuity hints only):',
       ctx.previousQuestions.map((q, i) => `${i + 1}. ${q}`).join('\n'),
+    );
+  }
+
+  if (ctx.pendingClarification) {
+    sections.push(
+      '',
+      'Pending clarification (the previous response was needs_clarification):',
+      `Original question: ${ctx.pendingClarification.originalQuestion}`,
+      `Agent asked: ${ctx.pendingClarification.clarificationQuestion}`,
+      `User answered: ${ctx.question}`,
+      '',
+      'Treat the user answer as the response to the agent question above.',
+      'Reconstruct the full analytics intent by combining the original question with the clarification answer, then plan accordingly.',
     );
   }
 

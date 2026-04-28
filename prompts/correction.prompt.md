@@ -23,7 +23,8 @@ credentials, tenants, or hosts.
 - `Tables`: allowed tables for this compile, with columns and primary
   keys.
 - `AllowedColumns`: `{ table: [columns…] }` map.
-- `Schema digest`: compact `table: col(type), …` rendering.
+- `Schema digest`: compact `table: col(type), …` rendering. Lines may
+  include `grain`, `responsibility`, `use_for`, and `avoid` metadata.
 - `MetricDefinitions` (optional): formulas the planner committed to.
   These remain authoritative — implement them literally.
 - `Assumptions` (optional): planner-recorded assumptions, baked in.
@@ -58,6 +59,10 @@ last must be `}`.
 7. **Schema fidelity.** Every table you reference MUST appear in
    `Tables`. Every column MUST appear in the corresponding allowed
    column list.
+   Treat schema metadata (`grain`, `responsibility`, `use_for`,
+   `avoid`) as authoritative business grounding. If the table is
+   line-item grain, do not count rows as orders; use a distinct entity
+   key such as `COUNT(DISTINCT order_id)` for order-level metrics.
 8. **Plan fidelity.** Use the planner's `targetTables`. Implement
    `metricDefinitions` formulas **literally** — do not substitute
    algebraic equivalents. Respect `filters`, `resultShape`,
@@ -69,6 +74,15 @@ last must be `}`.
 10. **Fix only what was flagged.** Do not rewrite parts of the SQL
    that weren't called out by the validator. Smaller, targeted
    corrections are more likely to converge within `MaxAttempts`.
+   **Never add a new JOIN to resolve a `V_COLUMN_NOT_ALLOWED` error.**
+   If a column is missing from the current table and you would need to
+   join a different table to get it, that means the planner chose the
+   wrong table — a structural problem you cannot fix here. Emit
+   empty `sql` with a rationale explaining which column is missing and
+   why it cannot be found in the allowed tables. Do not silently join
+   an aggregated table using a non-key column as a join condition
+   (e.g. joining on a count field like `orders` as though it were an
+   ID is always wrong).
 11. **`tables` must list every table referenced by the corrected SQL.**
 12. **No comments inside the SQL** (no `--`, no `/* */`).
 13. **No environment-style placeholders** (no `${…}`, no `%s`).
@@ -85,7 +99,7 @@ last must be `}`.
 | `V_DML_FORBIDDEN`       | Remove the DML clause entirely. Never re-emit the same kind.            |
 | `V_CROSS_DATABASE`      | Drop the database qualifier; use bare table names.                       |
 | `V_TABLE_NOT_ALLOWED`   | Switch to a table from `Tables`. If none fit, emit empty `sql`.         |
-| `V_COLUMN_NOT_ALLOWED`  | Replace with an allowed column from `AllowedColumns`. If none fits, emit empty `sql`. |
+| `V_COLUMN_NOT_ALLOWED`  | Find the correct column name in `AllowedColumns` for the same table and substitute it. If the metric requires a column that genuinely does not exist on any allowed table (e.g. `cancelled_orders` on `shopify_orders` which only has `financial_status`), do NOT add a new JOIN — emit empty `sql` instead. Adding joins to bypass missing columns is a planning error that correction cannot safely fix. |
 | `V_GROUP_BY_INVALID`    | Add the missing column to `GROUP BY`, or remove it from the `SELECT`.   |
 | `V_MISSING_LIMIT`       | Add a sensible `LIMIT` clause.                                          |
 | `V_COST_EXCEEDED`       | Reduce the join count; prefer a single-table query when possible.       |

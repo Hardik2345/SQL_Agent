@@ -24,11 +24,28 @@ const parseColumnEntry = (entry) => {
 };
 
 /**
+ * Returns true if `column` exists in at least one of the allowed tables.
+ * Used to validate unqualified identifiers that cannot be table-bound.
+ *
+ * @param {Map<string, Set<string>>} columnsByTable
+ * @param {string} column
+ */
+const existsInAnyAllowedTable = (columnsByTable, column) => {
+  const needle = column.toLowerCase();
+  for (const cols of columnsByTable.values()) {
+    if (cols.has(needle)) return true;
+  }
+  return false;
+};
+
+/**
  * Schema rule:
  *   - every referenced table must be in the allowed schema list
  *   - every qualified column must be in its table's allowed column list
+ *   - unqualified identifiers that contain whitespace and do not exist in
+ *     any allowed table are flagged (they are hallucinated column names)
  *
- * We intentionally skip validation for unqualified columns and for '*',
+ * We otherwise skip validation for unqualified columns and for '*',
  * because node-sql-parser can only resolve those with full binding info.
  *
  * Uses the canonical SchemaContext (`allowedTables`, `allowedColumns`)
@@ -85,7 +102,19 @@ export const runSchemaRule = (sql, schema) => {
   for (const entry of columns) {
     const { table, column } = parseColumnEntry(entry);
     if (!column || column === '*') continue;
-    if (!table) continue;
+
+    if (!table) {
+      if (/\s/.test(column) && !existsInAnyAllowedTable(columnsByTable, column)) {
+        issues.push(
+          issue({
+            code: VALIDATION_CODES.COLUMN_NOT_ALLOWED,
+            message: `Column not allowed: ${column}`,
+            meta: { column, qualified: false },
+          }),
+        );
+      }
+      continue;
+    }
 
     const allowed = columnsByTable.get(table.toLowerCase());
     if (!allowed) continue;
