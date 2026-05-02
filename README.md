@@ -61,6 +61,8 @@ are not wired yet.
   validation has remaining retry budget.
 - Connection pooling is owned entirely by this service, keyed by
   `brandId:host:port:database`.
+- MongoDB chat history stores full user/assistant turns for dashboard
+  rendering. It is separate from planner chat memory.
 
 ## Project layout
 
@@ -79,6 +81,7 @@ sql-agent/
 │   │   ├── sql/           # SQL generation context builders
 │   │   ├── context/       # Redis + Mongo + Qdrant retrieval orchestration
 │   │   ├── chatMemory/    # Redis/in-memory chat memory provider
+│   │   ├── chatHistory/   # Mongo/in-memory full chat history provider
 │   │   ├── semantic/      # Mongo/in-memory semantic metric catalog
 │   │   ├── vector/        # Qdrant/in-memory vector retrieval + embeddings
 │   │   ├── correction/    # Correction prompt context builders
@@ -136,6 +139,7 @@ START
   → correct      when validation fails and attempts remain
   → validate
   → execute
+  → explain_result
   → END
 ```
 
@@ -157,6 +161,8 @@ Node responsibilities:
 - `correct` returns a replacement `SqlDraft` in `mock` or `llm` mode and
   loops back to validation.
 - `execute` runs only after validation passes.
+- `explain_result` reads `ExecutionResult`, `QueryRequest`, and
+  `QueryPlan` and attaches a read-only natural-language explanation.
 
 ## Planner and SQL Modes
 
@@ -182,6 +188,11 @@ Correction mode is controlled by `CORRECTION_MODE`:
   validation issues.
 
 Correction attempts are capped by `MAX_CORRECTION_ATTEMPTS` (default `2`).
+
+Explanation mode is controlled by `EXPLANATION_MODE`:
+
+- `mock` — deterministic explanation, no OpenAI key required.
+- `llm` — uses `getLlm("explanation").invokeJson(...)`.
 
 The deterministic mock SQL is:
 
@@ -336,6 +347,107 @@ This flow writes Redis `confirmedMetricDefinitions` and skips SQL
 generation, validation, and execution. Later queries in the same
 `brandId + userId + conversationId` can use the confirmed definition.
 
+## Chat History API
+
+Chat history is a MongoDB-backed UI concern. It stores full turns for
+frontend rendering and refresh recovery. It is not used as planner memory in
+v1; planner memory still comes from Redis chat memory plus the Mongo archive
+fallback described above.
+
+Collections:
+
+| Collection | Purpose |
+|------------|---------|
+| `chat_conversations` | One row per `{ brandId, userId, conversationId }`. |
+| `chat_messages` | Ordered user/assistant messages for each conversation. |
+
+Indexes:
+
+| Collection | Index |
+|------------|-------|
+| `chat_conversations` | unique `{ brandId: 1, userId: 1, conversationId: 1 }` |
+| `chat_conversations` | `{ brandId: 1, userId: 1, updatedAt: -1 }` |
+| `chat_messages` | `{ brandId: 1, userId: 1, conversationId: 1, createdAt: 1 }` |
+
+Routes:
+
+| Method | Route | Purpose |
+|--------|-------|---------|
+| `POST` | `/insights/chats` | Create a server-generated chat id. |
+| `GET` | `/insights/chats` | List current tenant/user chats newest first. |
+| `GET` | `/insights/chats/:conversationId` | Fetch one chat and its messages. |
+| `POST` | `/insights/query` | Runs the existing query flow and appends turns when `context.conversationId` is present. |
+
+Create chat:
+
+```bash
+curl -X POST http://localhost:4000/insights/chats \
+  -H 'content-type: application/json' \
+  -H 'x-brand-id: YOUR_BRAND_ID' \
+  -d '{"title":"Sales analysis"}'
+```
+
+Response:
+
+```json
+{
+  "ok": true,
+  "correlationId": "...",
+  "chat": {
+    "conversationId": "server-generated-uuid",
+    "title": "Sales analysis",
+    "brandId": "TMC",
+    "userId": "dev-user",
+    "createdAt": "...",
+    "updatedAt": "..."
+  }
+}
+```
+
+List chats:
+
+```bash
+curl 'http://localhost:4000/insights/chats?limit=50' \
+  -H 'x-brand-id: YOUR_BRAND_ID'
+```
+
+Fetch chat:
+
+```bash
+curl http://localhost:4000/insights/chats/server-generated-uuid \
+  -H 'x-brand-id: YOUR_BRAND_ID'
+```
+
+Message shape:
+
+```json
+{
+  "id": "...",
+  "role": "assistant",
+  "content": "Returned 1 row.",
+  "createdAt": "...",
+  "type": "execution",
+  "correlationId": "...",
+  "result": {
+    "ok": true,
+    "columns": ["gross_sales"],
+    "rows": [{ "gross_sales": 100 }],
+    "stats": { "rowCount": 1, "elapsedMs": 42, "truncated": false }
+  }
+}
+```
+
+Assistant message `type` can be `execution`, `clarification_required`,
+`memory_ack`, or `error`.
+
+Dashboard frontend helpers live in `client/dashboard/src/lib/api.js` in the
+dashboard repo:
+
+- `createInsightChat(title?)`
+- `listInsightChats({ limit, cursor })`
+- `getInsightChat(conversationId)`
+- `sendInsightQuery({ conversationId, question, userId })`
+
 ## Execution Layer
 
 `apps/api/src/modules/execution/executor.js` executes validated SQL with
@@ -380,6 +492,7 @@ Important variables:
 | `SQL_MODE` | `mock` or `llm`. |
 | `CORRECTION_MODE` | `mock` or `llm`. |
 | `MAX_CORRECTION_ATTEMPTS` | Maximum correction retries before returning `E_VALIDATION`. |
+| `EXPLANATION_MODE` | `mock` or `llm`; controls the post-execution explanation node. |
 | `DEV_LOG_GENERATED_SQL` | Dev-only flag that logs generated/corrected SQL text when `NODE_ENV` is not `production`. |
 | `REDIS_URL` | Redis connection URL for chat memory. Falls back to in-memory when unset. |
 | `CHAT_MEMORY_TTL_SECONDS` | Redis chat memory TTL; default `86400`. |

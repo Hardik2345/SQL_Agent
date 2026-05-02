@@ -51,11 +51,23 @@ export const env = Object.freeze({
     poolConnectionLimit: toInt(process.env.POOL_CONNECTION_LIMIT, 10),
     poolIdleTimeoutMs: toInt(process.env.POOL_IDLE_TIMEOUT_MS, 600000),
     ssl: toBool(process.env.MYSQL_SSL, false),
+    // When ssl=true, controls whether the TLS certificate chain is
+    // verified. Set to false for self-signed / private CA certs (e.g.
+    // local dev MySQL, non-RDS cloud DBs). Defaults to false so self-
+    // signed certs work out of the box; set to true for AWS RDS Proxy
+    // or any endpoint with a publicly-signed cert.
+    sslRejectUnauthorized: toBool(process.env.MYSQL_SSL_REJECT_UNAUTHORIZED, false),
   }),
 
   llm: Object.freeze({
     apiKey: process.env.OPENAI_API_KEY ?? '',
     model: process.env.LLM_MODEL ?? 'gpt-4o-mini',
+    plannerModel: process.env.LLM_MODEL_PLANNER ?? process.env.LLM_MODEL ?? 'gpt-4o-mini',
+    sqlModel: process.env.LLM_MODEL_SQL ?? process.env.LLM_MODEL ?? 'gpt-4o-mini',
+    correctionModel:
+      process.env.LLM_MODEL_CORRECTION ?? process.env.LLM_MODEL ?? 'gpt-4o-mini',
+    explanationModel:
+      process.env.LLM_MODEL_EXPLANATION ?? process.env.LLM_MODEL ?? 'gpt-4o-mini',
   }),
 
   planner: Object.freeze({
@@ -94,6 +106,12 @@ export const env = Object.freeze({
       }
       return parsed;
     })(),
+  }),
+
+  explanation: Object.freeze({
+    // Same fail-safe pattern as planner/sql/correction. Mock mode is
+    // deterministic and does not call an LLM.
+    mode: process.env.EXPLANATION_MODE === 'llm' ? 'llm' : 'mock',
   }),
 
   // Phase 2D: external services for the context loader. ALL OPTIONAL

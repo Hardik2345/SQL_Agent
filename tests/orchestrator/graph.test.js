@@ -122,6 +122,42 @@ describe('orchestrator nodes', () => {
       'expected at least one error-severity issue',
     );
   });
+
+  it('validateNode rejects SQL that references a table outside plan.targetTables', async () => {
+    const base = initialState({ correlationId: 'c1', request, tenant });
+    const withSchema = { ...base, ...(await loadSchemaNode(base)) };
+    /** @type {any} */
+    const bad = {
+      ...withSchema,
+      plan: {
+        intent: 'metric_calculation',
+        targetTables: ['shopify_orders'],
+        requiredMetrics: ['conversion_rate'],
+        resultShape: 'grouped_breakdown',
+        dimensions: ['product_id'],
+        filters: ['last 7 days'],
+        notes: 'rank by sessions',
+        status: 'ready',
+        clarificationQuestion: null,
+        assumptions: ['rank_by:sessions:desc'],
+        metricDefinitions: [],
+      },
+      sqlDraft: {
+        sql: 'SELECT so.product_id, SUM(hss.number_of_sessions) AS sessions FROM shopify_orders so JOIN hourly_sessions_summary hss ON 1=1 GROUP BY so.product_id LIMIT 5',
+        dialect: 'mysql',
+        tables: ['shopify_orders', 'hourly_sessions_summary'],
+      },
+    };
+    const patch = await validateNode(bad);
+    assert.equal(patch.status, AGENT_STATUS.VALIDATED);
+    assert.equal(patch.validation.valid, false);
+    assert.ok(
+      patch.validation.issues.some(
+        (i) => i.code === 'V_TABLE_NOT_ALLOWED' || i.code === 'V_COLUMN_NOT_ALLOWED',
+      ),
+      `expected plan-scoped schema violation, got ${JSON.stringify(patch.validation.issues)}`,
+    );
+  });
 });
 
 describe('compiled graph', () => {
@@ -136,7 +172,7 @@ describe('compiled graph', () => {
     // in apps/api/src/utils/constants.js. The conceptual graph order
     // (load_schema -> plan -> generate_sql -> validate -> execute) is
     // unchanged.
-    for (const expected of ['load_schema', 'load_context', 'planner', 'generate_sql', 'validate', 'correct', 'execute']) {
+    for (const expected of ['load_schema', 'load_context', 'planner', 'generate_sql', 'validate', 'correct', 'execute', 'explain_result']) {
       assert.ok(nodeIds.includes(expected), `missing node ${expected}; got ${nodeIds.join(',')}`);
     }
 
@@ -159,6 +195,7 @@ describe('compiled graph', () => {
     assert.ok(adj['validate']?.includes('correct'));
     assert.ok(adj['validate']?.includes('__end__'));
     assert.ok(adj['correct']?.includes('validate'), 'correct must loop back to validate');
-    assert.ok(adj['execute']?.includes('__end__'));
+    assert.ok(adj['execute']?.includes('explain_result'));
+    assert.ok(adj['explain_result']?.includes('__end__'));
   });
 });

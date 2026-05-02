@@ -3,6 +3,44 @@ import { logger } from '../../utils/logger.js';
 import { validate } from '../../modules/validation/validator.js';
 
 /**
+ * Restrict the validator's schema surface to the planner-approved
+ * target tables. This makes plan fidelity deterministic: SQL that
+ * introduces a new table outside `plan.targetTables` is rejected at
+ * validation time instead of slipping through because the full tenant
+ * schema happens to contain that table.
+ *
+ * @param {import('../../modules/schema/schema.types.js').SchemaContext} schemaContext
+ * @param {string[] | undefined} targetTables
+ */
+const scopeSchemaToPlanTables = (schemaContext, targetTables) => {
+  const focusTables =
+    Array.isArray(targetTables) && targetTables.length > 0
+      ? targetTables.filter((t) => t in schemaContext.tables)
+      : schemaContext.allowedTables.slice();
+
+  /** @type {import('../../modules/schema/schema.types.js').SchemaContext} */
+  const scoped = {
+    ...schemaContext,
+    tables: Object.fromEntries(
+      focusTables
+        .filter((name) => name in schemaContext.tables)
+        .map((name) => [name, schemaContext.tables[name]]),
+    ),
+    allowedTables: focusTables.slice(),
+    allowedColumns: Object.fromEntries(
+      focusTables.map((name) => [name, schemaContext.allowedColumns[name] ?? []]),
+    ),
+    allowedJoins: Array.isArray(schemaContext.allowedJoins)
+      ? schemaContext.allowedJoins.filter(
+        (j) => focusTables.includes(j.fromTable) && focusTables.includes(j.toTable),
+      )
+      : [],
+  };
+
+  return scoped;
+};
+
+/**
  * Validate node: runs the validation pipeline against the current SQL
  * draft using the SchemaContext that the load_schema node attached
  * earlier.
@@ -21,7 +59,7 @@ import { validate } from '../../modules/validation/validator.js';
  * @param {import('../../modules/contracts/agentState.js').AgentState} state
  */
 export const validateNode = async (state) => {
-  const { sqlDraft, tenant, schemaContext, correlationId, correctionAttempts } = state;
+  const { sqlDraft, tenant, schemaContext, plan, correlationId, correctionAttempts } = state;
   if (!sqlDraft) {
     throw new Error('validateNode requires an sqlDraft');
   }
@@ -31,9 +69,11 @@ export const validateNode = async (state) => {
     );
   }
 
+  const scopedSchema = scopeSchemaToPlanTables(schemaContext, plan?.targetTables);
+
   const result = validate({
     sql: sqlDraft.sql,
-    schema: schemaContext,
+    schema: scopedSchema,
   });
 
   if (!result.valid) {

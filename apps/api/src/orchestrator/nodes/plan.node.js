@@ -38,7 +38,11 @@ const PROMPT_PATH = path.resolve(
 let cachedSystemPrompt = null;
 
 const loadSystemPrompt = async () => {
-  if (cachedSystemPrompt) return cachedSystemPrompt;
+  // In development, always re-read the file so prompt edits take effect
+  // without a container rebuild or process restart.
+  if (cachedSystemPrompt && process.env.NODE_ENV !== 'development') {
+    return cachedSystemPrompt;
+  }
   cachedSystemPrompt = await fs.readFile(PROMPT_PATH, 'utf8');
   return cachedSystemPrompt;
 };

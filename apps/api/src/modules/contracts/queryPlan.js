@@ -112,8 +112,23 @@ const normalizePlan = (raw) => {
   if (out.resultShape === undefined) {
     out.resultShape = out.timeGrain ? 'time_series' : 'single_aggregate';
   }
+  // Some prompt variants/examples may emit `timeGrain: null` for
+  // non-time-series plans. The contract treats timeGrain as optional
+  // string (or omitted), so normalize null to omitted here.
+  if (out.timeGrain === null) {
+    delete out.timeGrain;
+  }
   if (out.dimensions === undefined) {
     out.dimensions = out.resultShape === 'time_series' ? ['date'] : [];
+  }
+  // Defensive fallback: model returned needs_clarification but omitted
+  // clarificationQuestion. Extract from notes if present, otherwise use
+  // a generic fallback so the request degrades gracefully instead of
+  // throwing a ContractError that renders as E_INTERNAL.
+  if (out.status === NEEDS_CLARIFICATION && !isNonEmptyString(out.clarificationQuestion)) {
+    out.clarificationQuestion = isNonEmptyString(out.notes)
+      ? String(out.notes).slice(0, 500)
+      : 'Could you provide more details about what you are looking for?';
   }
   return out;
 };

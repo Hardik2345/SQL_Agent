@@ -1,4 +1,4 @@
-import { tableList, columnList } from '../../../lib/parser.js';
+import { tableList, columnList, parseSql } from '../../../lib/parser.js';
 import { VALIDATION_CODES } from '../../../utils/constants.js';
 import { issue } from '../../contracts/validationResult.js';
 
@@ -39,6 +39,60 @@ const existsInAnyAllowedTable = (columnsByTable, column) => {
 };
 
 /**
+ * Returns true if `column` exists in at least one of the referenced
+ * tables from the current SQL statement.
+ *
+ * @param {Map<string, Set<string>>} columnsByTable
+ * @param {Set<string>} referencedTables
+ * @param {string} column
+ */
+const existsInReferencedTables = (columnsByTable, referencedTables, column) => {
+  const needle = column.toLowerCase();
+  for (const table of referencedTables) {
+    const cols = columnsByTable.get(table);
+    if (cols?.has(needle)) return true;
+  }
+  return false;
+};
+
+/**
+ * Collect SELECT output aliases from one AST node (including UNION branches
+ * and all nested subqueries in FROM clauses). This ensures that an alias
+ * defined in an inner subquery (e.g. `conversion_rate` in a derived table)
+ * is not falsely flagged as an unknown column when it appears unqualified in
+ * ORDER BY or a parent SELECT.
+ *
+ * @param {any} astNode
+ * @param {Set<string>} out
+ */
+const collectSelectAliasesFromAst = (astNode, out) => {
+  if (!astNode || typeof astNode !== 'object') return;
+
+  // Collect aliases from this level's SELECT columns
+  const columns = Array.isArray(astNode.columns) ? astNode.columns : [];
+  for (const col of columns) {
+    if (typeof col?.as === 'string' && col.as.trim()) {
+      out.add(col.as.toLowerCase());
+    }
+  }
+
+  // Recurse into FROM-clause subqueries (derived tables / CTEs)
+  const from = Array.isArray(astNode.from) ? astNode.from : [];
+  for (const fromEntry of from) {
+    if (fromEntry?.expr?.ast && typeof fromEntry.expr.ast === 'object') {
+      collectSelectAliasesFromAst(fromEntry.expr.ast, out);
+    } else if (fromEntry?.expr && typeof fromEntry.expr === 'object') {
+      collectSelectAliasesFromAst(fromEntry.expr, out);
+    }
+  }
+
+  // node-sql-parser represents UNION chains through `_next` in many versions.
+  if (astNode._next && typeof astNode._next === 'object') {
+    collectSelectAliasesFromAst(astNode._next, out);
+  }
+};
+
+/**
  * Schema rule:
  *   - every referenced table must be in the allowed schema list
  *   - every qualified column must be in its table's allowed column list
@@ -72,9 +126,15 @@ export const runSchemaRule = (sql, schema) => {
 
   let tables;
   let columns;
+  /** @type {Set<string>} */
+  const selectAliases = new Set();
   try {
     tables = tableList(sql);
     columns = columnList(sql);
+    const astList = parseSql(sql);
+    for (const ast of astList) {
+      collectSelectAliasesFromAst(ast, selectAliases);
+    }
   } catch (err) {
     issues.push(
       issue({
@@ -99,12 +159,27 @@ export const runSchemaRule = (sql, schema) => {
     }
   }
 
+  const referencedTables = new Set(
+    tables
+      .map((entry) => parseTableEntry(entry).table?.toLowerCase())
+      .filter((t) => typeof t === 'string' && allowedTableNames.has(t)),
+  );
+
   for (const entry of columns) {
     const { table, column } = parseColumnEntry(entry);
     if (!column || column === '*') continue;
 
     if (!table) {
-      if (/\s/.test(column) && !existsInAnyAllowedTable(columnsByTable, column)) {
+      if (selectAliases.has(column.toLowerCase())) {
+        continue;
+      }
+
+      const existsInScope =
+        referencedTables.size > 0
+          ? existsInReferencedTables(columnsByTable, referencedTables, column)
+          : existsInAnyAllowedTable(columnsByTable, column);
+
+      if (!existsInScope) {
         issues.push(
           issue({
             code: VALIDATION_CODES.COLUMN_NOT_ALLOWED,

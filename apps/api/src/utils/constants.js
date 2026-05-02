@@ -35,6 +35,7 @@ export const NODE = Object.freeze({
   VALIDATE: 'validate',
   CORRECT: 'correct',
   EXECUTE: 'execute',
+  EXPLAIN_RESULT: 'explain_result',
 });
 
 export const AGENT_STATUS = Object.freeze({

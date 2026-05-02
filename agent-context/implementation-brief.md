@@ -1,4 +1,4 @@
-# SQL Agent — Implementation Brief (Phase 1 + 2A + 2B + 2B-B + 2C + 2D)
+# SQL Agent — Implementation Brief (Phase 1 + 2A + 2B + 2B-B + 2C + 2D + Chat History API)
 
 This brief summarizes the current state of the SQL Agent service. It is
 intended as context for a downstream agent that will continue
@@ -29,7 +29,7 @@ you don't duplicate or re-scope committed work.
 The service sits between three external components:
 
 ```
-┌─────────────┐   POST /insights/query   ┌──────────────┐
+┌─────────────┐   /insights/query|chats  ┌──────────────┐
 │ api-gateway │ ────────────────────────▶│  sql-agent   │
 │ (OpenResty) │   HMAC-signed headers    │  (this repo) │
 └─────────────┘                          └──────┬───────┘
@@ -165,9 +165,27 @@ controller writes a chat-memory delta via `extractMemoryFromPlan`
 (question + metric refs + filter refs + chat-confirmed metric
 definitions only — never SQL or LLM prose).
 
-**Not built** (Phase 2E+): result explanation, caching beyond the
-schema cache, advanced planner logic, vector-store ingestion
-pipeline, admin UI for `retrievalContext` traces.
+**Chat History API (built)**: MongoDB-backed full chat persistence for
+dashboard rendering. New routes create server-generated
+`conversationId`s, list chats for the current `{brandId,userId}`, fetch
+a chat and its ordered messages, and append user/assistant turns from
+`POST /insights/query` whenever `context.conversationId` is present.
+This is intentionally separate from planner chat memory: chat history is
+UI state, while Redis/Mongo chat memory remains the planner context
+source.
+
+**Phase 2E (built)**: result explanation layer. A new
+`explain_result` node runs after successful execution and attaches an
+optional `state.explanation`. The node is read-only over
+`ExecutionResult + QueryRequest + QueryPlan`; it never sees SQL,
+credentials, tenant routing, or the full dataset (sample rows are capped
+at 5). `EXPLANATION_MODE=mock` returns a deterministic table summary;
+`EXPLANATION_MODE=llm` invokes `getLlm('explanation')` and validates the
+returned `InsightExplanation`.
+
+**Not built** (Phase 2F+): caching beyond the schema cache, advanced
+planner logic, vector-store ingestion pipeline, admin UI for
+`retrievalContext` traces.
 
 ---
 
@@ -177,12 +195,13 @@ pipeline, admin UI for `retrievalContext` traces.
 SQL_agent/
 ├── apps/api/src/
 │   ├── controllers/insight.controller.js
+│   ├── controllers/chat.controller.js
 │   ├── routes/insight.routes.js
 │   ├── middleware/tenantContext.middleware.js
 │   ├── orchestrator/
 │   │   ├── graph.js
 │   │   ├── state.js
-│   │   └── nodes/{schema,plan,sql,validate,execute}.node.js
+│   │   └── nodes/{schema,plan,sql,validate,execute,explain}.node.js
 │   ├── modules/
 │   │   ├── schema/                     ← Phase 2A
 │   │   │   ├── schema.types.js
@@ -200,12 +219,17 @@ SQL_agent/
 │   │   ├── chatMemory/                 ← Phase 2D
 │   │   │   ├── chatMemoryProvider.js
 │   │   │   └── memoryExtractor.js
+│   │   ├── chatHistory/                ← Frontend chat history API
+│   │   │   └── chatHistoryProvider.js
 │   │   ├── semantic/                   ← Phase 2D
 │   │   │   ├── semantic.types.js
 │   │   │   └── semanticProvider.js
 │   │   ├── vector/                     ← Phase 2D
 │   │   │   ├── embeddingService.js
 │   │   │   └── vectorClient.js
+│   │   ├── explanation/                ← Phase 2E
+│   │   │   ├── explanationContext.js
+│   │   │   └── explanation.types.js
 │   │   ├── validation/
 │   │   │   ├── validator.js
 │   │   │   ├── rules/{syntax,safety,schema,cost}.rule.js
@@ -285,6 +309,105 @@ x-correlation-id: optional; generated if absent
 }
 ```
 
+When `context.conversationId` is present, the controller also writes a
+full chat-history turn to MongoDB/in-memory history:
+
+- user message: original question
+- assistant message:
+  - `type: "execution"` with `columns`, `rows`, `stats`
+  - `type: "clarification_required"` with the clarification payload
+  - `type: "memory_ack"` with confirmed definitions
+  - `type: "error"` with error details
+
+If `context.conversationId` is absent, query behaviour stays backward
+compatible and no UI chat-history turn is written.
+
+### `POST /insights/chats`
+
+Creates a server-generated chat id scoped to current `{brandId,userId}`.
+
+**Body**:
+
+```json
+{ "title": "Sales analysis" }
+```
+
+`title` is optional. If omitted, explicit chat creation uses `"New chat"`.
+If a query arrives with a previously unknown `conversationId`, the
+implicit conversation title is the first question.
+
+**Response**:
+
+```json
+{
+  "ok": true,
+  "correlationId": "…",
+  "chat": {
+    "conversationId": "uuid",
+    "title": "Sales analysis",
+    "brandId": "TMC",
+    "userId": "user-id",
+    "lastMessagePreview": null,
+    "lastResultSummary": null,
+    "createdAt": "…",
+    "updatedAt": "…"
+  }
+}
+```
+
+### `GET /insights/chats`
+
+Lists chats for the current `{brandId,userId}`, newest first.
+
+Query params:
+
+- `limit` — default 50, clamped to 1..100.
+- `cursor` — ISO `updatedAt` cursor returned as `nextCursor`.
+
+**Response**:
+
+```json
+{
+  "ok": true,
+  "correlationId": "…",
+  "chats": [
+    {
+      "conversationId": "uuid",
+      "title": "Sales analysis",
+      "lastMessagePreview": "Returned 1 row.",
+      "lastResultSummary": "rows=1; truncated=false",
+      "createdAt": "…",
+      "updatedAt": "…"
+    }
+  ],
+  "nextCursor": null
+}
+```
+
+### `GET /insights/chats/:conversationId`
+
+Fetches one scoped chat and its ordered messages. Cross-user/cross-tenant
+lookups return `E_CHAT_NOT_FOUND` / HTTP 404.
+
+**Message shape**:
+
+```json
+{
+  "id": "uuid",
+  "role": "assistant",
+  "content": "Returned 1 row.",
+  "createdAt": "…",
+  "type": "execution",
+  "correlationId": "…",
+  "result": {
+    "ok": true,
+    "columns": ["gross_sales"],
+    "rows": [{ "gross_sales": 100 }],
+    "stats": { "rowCount": 1, "elapsedMs": 42, "truncated": false }
+  }
+}
+```
+
 ### `GET /health`
 
 Returns `{ ok: true }`. Used by Docker healthchecks.
@@ -304,7 +427,10 @@ client → gateway → tenantContextMiddleware → insight.controller → orches
                                                                        ├─ validate     [REAL — non-throwing]
                                                                        ├─ (conditional) → correct (loop, ≤ MAX) | END (exhausted)
                                                                        ├─ correct      [REAL: mock|llm] → validate
-                                                                       └─ execute      [REAL] → (controller fire-and-forget memory write)
+                                                                       ├─ execute      [REAL]
+                                                                       └─ explain_result [REAL: mock|llm, read-only]
+                                                                                       → (controller fire-and-forget memory write)
+                                                                                          + chat-history append when conversationId exists
                                                                               │
                                                                               ▼
                                                                      tenant MySQL pool
@@ -314,7 +440,7 @@ Graph edges (with Phase 2B planner conditional, Phase 2C correction
 loop, and Phase 2D context loader):
 
 ```
-START → load_schema → load_context → planner ─┬─→ generate_sql → validate ─┬─→ execute → END
+START → load_schema → load_context → planner ─┬─→ generate_sql → validate ─┬─→ execute → explain_result → END
                                                └─→ END (clarification)      ├─→ correct → validate (loop, ≤ MAX_CORRECTION_ATTEMPTS)
                                                                             └─→ END   (correction exhausted; controller emits 422)
 ```
@@ -405,10 +531,15 @@ START → load_schema → load_context → planner ─┬─→ generate_sql →
 | **Context loader**             | `modules/context/contextLoader.js` — Phase 2D; `createContextLoader({chatMemory, semantic, vector, topK})` pure DI surface; `createDefaultContextLoader()` env-driven default |
 | **Chat memory provider**       | `modules/chatMemory/chatMemoryProvider.js` — Phase 2D; Redis (lazy-import) + in-memory TTL fallback; tenant-scoped key `sql-agent:chat:{brandId}:{userId}:{conversationId}` |
 | **Memory extractor**           | `modules/chatMemory/memoryExtractor.js` — Phase 2D; pure `extractMemoryFromPlan({request, plan, result})` — never returns SQL or LLM prose |
+| **Chat history provider**      | `modules/chatHistory/chatHistoryProvider.js` — MongoDB full chat-history provider with in-memory fallback; collections `chat_conversations` + `chat_messages`; server-generated ids via `crypto.randomUUID()` |
+| **Chat controller**            | `controllers/chat.controller.js` — `POST /insights/chats`, `GET /insights/chats`, `GET /insights/chats/:conversationId`; tenant/user scoped through existing middleware |
 | **Semantic catalog**           | `modules/semantic/semanticProvider.js` — Phase 2D; MongoDB (lazy-import) + in-memory fallback; `metricsToGlobalContext` pure projection |
 | **Embedding service**          | `modules/vector/embeddingService.js` — Phase 2D; OpenAI (`@langchain/openai` lazy-import) + deterministic SHA-256 unit-normalised mock |
 | **Vector client**              | `modules/vector/vectorClient.js` — Phase 2D; Qdrant via `undici` (no extra dep) + in-memory cosine fallback; tenant-scoped filter |
+| **Explanation context builder** | `modules/explanation/explanationContext.js` — Phase 2E; pure lightweight context from request + plan + execution; caps sampleRows at 5 and never includes SQL |
+| **Explanation node (mock + llm)** | `orchestrator/nodes/explain.node.js` — Phase 2E; read-only post-execution interpretation layer; validates `InsightExplanation` |
 | **Controller response builder + status + memory write** | `controllers/insight.controller.js` — `buildResponseFromState` + `httpStatusForState` exported for tests; fire-and-forget `writeMemoryDelta` after execution |
+| **Chat-history append hook**   | `controllers/insight.controller.js` — persists full user/assistant turns after success/error when `request.context.conversationId` exists; swallowed on write failure |
 | **LLM client**      | `lib/llm.js` — `getLlm(role)` returns `{ invokeJson }`, OpenAI JSON-mode |
 | Error hierarchy     | `utils/errors.js`                                        |
 | Logger (redacted)   | `utils/logger.js`                                        |
@@ -577,6 +708,86 @@ test suite):
 
 Memory write failures are caught and logged; they NEVER affect the
 HTTP response.
+
+### Chat history persistence (frontend API)
+
+This is a separate persistence layer from Phase 2D planner memory.
+
+**Purpose split**:
+
+- `chatMemory` (`Redis` + Mongo archive): compact planner context —
+  recent questions, confirmed metric definitions, refs, and tiny result
+  summaries.
+- `chatHistory` (`MongoDB` collections): full UI history — chat list,
+  message transcript, execution rows, clarification payloads, memory
+  acknowledgements, and errors.
+
+**Provider**:
+
+- File: `apps/api/src/modules/chatHistory/chatHistoryProvider.js`.
+- Real path: lazy-imports `mongodb` and uses existing `env.mongo.uri`
+  / `env.mongo.db`.
+- Fallback path: in-memory provider with identical async API when Mongo
+  is unset/unavailable, mainly for local tests and degraded dev.
+
+**Collections and indexes**:
+
+| Collection | Index |
+|---|---|
+| `chat_conversations` | unique `{ brandId: 1, userId: 1, conversationId: 1 }` |
+| `chat_conversations` | `{ brandId: 1, userId: 1, updatedAt: -1 }` |
+| `chat_messages` | `{ brandId: 1, userId: 1, conversationId: 1, createdAt: 1 }` |
+
+**Write path**:
+
+1. Frontend creates a chat through `POST /insights/chats`, or sends an
+   existing `context.conversationId`.
+2. `/insights/query` runs the normal orchestrator.
+3. The controller builds the same public response envelope as before.
+4. If `context.conversationId` exists, the controller appends a user
+   message and assistant message via `appendTurn`.
+5. The conversation metadata is updated with assistant preview,
+   `lastResultSummary`, and `updatedAt`.
+
+The chat-history write is deliberately non-blocking from a product
+correctness perspective: failures are logged and swallowed so query
+execution still returns to the user. Planner memory writes remain
+separate and continue through the existing Redis/Kafka archive path.
+
+### Result explanation layer (Phase 2E)
+
+`explain_result` runs after `execute` and before `END`.
+
+**Contract**:
+
+- Input: `ExecutionResult + QueryRequest + QueryPlan`.
+- Output: optional `state.explanation` (`InsightExplanation`).
+- It never modifies `execution.columns`, `execution.rows`, or
+  `execution.stats`.
+- It never receives SQL or credentials.
+- It only receives `execution.rows.slice(0, 5)` through
+  `buildExplanationContext`.
+
+**Modes**:
+
+| Mode | Behavior |
+|------|----------|
+| `mock` | Deterministic `table_result` summary: `"Returned N rows."`; no LLM call. |
+| `llm` | Loads `prompts/explanation.prompt.md`, calls `getLlm('explanation').invokeJson(...)`, and validates headline/summary/keyPoints plus the full `InsightExplanation` contract. |
+
+**Response mode**:
+
+The request may pass `context.responseMode`:
+
+| Value | Response behavior |
+|-------|-------------------|
+| `both` or omitted | Return normal execution result plus `result.explanation`. |
+| `table` | Return only the original execution result; omit explanation. |
+| `insight` | Return `{ ok: true, explanation }` without `columns`, `rows`, or `stats`. |
+
+This mode affects only the HTTP response shape. It does not affect SQL
+generation, validation, execution, memory writes, or the underlying
+execution result.
 
 ### Validate node behaviour change (Phase 2C)
 
@@ -833,19 +1044,24 @@ Run: `npm test`. Lint: `npm run lint` (tsc with `checkJs`).
 | `tests/orchestrator/nodes/context.node.test.js` | 5     | Phase 2D — attaches all three contexts, missing-input guards, planner consumes the new patch shape, **graph wiring** verifies `load_schema → load_context → planner` and `load_schema` does NOT skip `load_context` |
 | `tests/context/contextLoader.test.js`           | 11    | Phase 2D hybrid retrieval — empty grounding when nothing seeded, vector → catalog round-trip builds `globalContext.metrics`, chat memory surfaces in `chatContext`, **vector failures non-fatal** (graceful), missing-input errors, **memoryExtractor only persists chat-confirmed metric definitions**, never stores SQL |
 | `tests/chatMemory/chatMemoryProvider.test.js`   | 7     | Phase 2D — normalize/merge helpers (capping, delta-precedence), in-memory get/update, **TTL respected**, **tenant-scoped keys**, env fallback discriminator |
+| `tests/chatHistory/chatHistoryProvider.test.js` | 6     | Frontend chat history — in-memory provider create/list/get/append, tenant+user scoping, cursor pagination, preview/result summary helpers |
 | `tests/semantic/semanticProvider.test.js`       | 6     | Phase 2D — tenant-scoped `getMetricsByIds` (never returns other brand), synonym lookup (case-insensitive), `metricsToGlobalContext` projection, env fallback |
 | `tests/vector/vectorClient.test.js`             | 6     | Phase 2D — deterministic embeddings stable + unit-normalised, in-memory cosine ranking, **tenant-scoped vector filter**, empty-input guards, env fallback |
 | `tests/controllers/insight.controller.test.js`  | 6     | Clarification envelope; execution envelope still works for `ready`; works without log; `E_VALIDATION` envelope after correction exhausted (with `correctionAttempts` + `correctionHistory` in details); `httpStatusForState` returns 422 / 200 correctly |
+| `tests/controllers/insight.chatHistory.test.js` | 3     | Query controller appends chat-history turns for execution + clarification and preserves backward compatibility when no `conversationId` is present |
+| `tests/controllers/chat.controller.test.js`     | 4     | Chat API create/list/get, tenant/user scoping, 404 on cross-user/cross-tenant misses |
+| `tests/explanation/explanationContext.test.js`  | 1     | Phase 2E context builder caps sample rows at 5 and excludes SQL/credentials |
+| `tests/explanation/explain.node.test.js`        | 4     | Phase 2E mock explanation, LLM parsing, prompt sample cap/no-SQL guarantee, missing-execution ContractError |
 | `tests/middleware/tenantContext.test.js`        | 4     | Missing/bad/expired signature; body-brandId ignored|
 | `tests/schema/schemaProvider.test.js`           | 12    | Parser real-dump coverage, cache reuse, credential leak guard, assertSchemaContext invariants |
 
-Current status: **169/169 passing, 0 lint errors.**
+Current status: **214/214 passing, 0 lint errors.**
 
 > **Hermetic test runner**: `npm test` now sets
 > `PLANNER_MODE=mock SQL_MODE=mock CORRECTION_MODE=mock` via `env`
-> prefix on each spawned `node --test` so tests don't pick up
-> developer `.env` overrides (which often have `=llm` set for live
-> dev runs).
+> prefix on each spawned `node --test`; explanation defaults to mock
+> unless `EXPLANATION_MODE=llm` is explicitly set. This keeps tests from
+> picking up developer `.env` overrides used for live dev runs.
 
 > **Test runner note**: `npm test` uses
 > `find tests -name '*.test.js' -print0 | xargs -0 node --test` rather
@@ -880,11 +1096,13 @@ Defined in `.env.example`. Runtime validation in `config/env.js`.
 | `SQL_MODE` | default `mock` | `mock` (deterministic SELECT against `gross_summary`) or `llm` (real SQL generator). Anything else = `mock` (fail-safe). |
 | `CORRECTION_MODE` | default `mock` | `mock` (return failing SQL unchanged — loop exits at cap) or `llm` (real correction). Anything else = `mock` (fail-safe). |
 | `MAX_CORRECTION_ATTEMPTS` | default `2` | Cap on correction retries before `E_VALIDATION` is returned. Set to `0` to disable correction (single-shot validate). Must be ≥ 0. |
+| `EXPLANATION_MODE` | default `mock` | `mock` (deterministic table summary) or `llm` (real result explanation). Anything else = `mock` (fail-safe). |
 | `REDIS_URL` | optional (Phase 2D) | When set, chat memory uses real Redis. Unset → in-memory provider. |
 | `CHAT_MEMORY_TTL_SECONDS` | default `86400` | Chat memory TTL. Same setting honoured by both Redis and in-memory paths. |
-| `MONGO_URI` | optional (Phase 2D) | When set, semantic catalog uses real Mongo. Unset → in-memory empty catalog. |
+| `MONGO_URI` | optional (Phase 2D + chat history) | When set, semantic catalog, chat-memory archive, and chat-history API use real Mongo. Unset → in-memory/fallback providers. |
 | `MONGO_DB` | default `sql_agent` | Mongo database name when `MONGO_URI` is set. |
 | `MONGO_METRICS_COLLECTION` | default `metrics` | Collection name for `SemanticMetric` documents. |
+| `MONGO_CHAT_MEMORY_COLLECTION` | default `chat_memory` | Collection for durable compact Redis chat-memory snapshots. Full UI chat history uses fixed collections `chat_conversations` and `chat_messages`. |
 | `QDRANT_URL` | optional (Phase 2D) | When set, vector store uses Qdrant via REST. Unset → in-memory cosine fallback. |
 | `QDRANT_API_KEY` | optional | Sent as `api-key` header when present. |
 | `QDRANT_COLLECTION` | default `semantic_metrics` | Qdrant collection name. |
@@ -903,6 +1121,10 @@ Defined in `.env.example`. Runtime validation in `config/env.js`.
 - **.dockerignore** — excludes tests, node_modules, .env.
 - **docs/GATEWAY_INTEGRATION.md** — nginx + docker-compose patches for
   wiring sql-agent behind the shared api-gateway.
+- **Dashboard API helpers** — `/Users/hardik/Projects/dashboard/client/dashboard/src/lib/api.js`
+  exports `createInsightChat`, `listInsightChats`, `getInsightChat`, and
+  `sendInsightQuery`. These call the gateway `/insights/*` routes and
+  should be used by the dashboard chat UI.
 
 sql-agent's port is NOT exposed to the host — the gateway is the only
 public entry point.
@@ -1052,6 +1274,10 @@ public entry point.
   always.** Reordering or skipping it means the planner runs without
   any grounding from chat memory or the semantic catalog,
   regressing Phase 2D entirely.
+- **Chat history is not planner memory.** Do not feed
+  `chat_messages` back into the planner in v1. Planner context comes
+  from compact `chatMemory` and semantic retrieval. Full chat history
+  exists for frontend rendering and refresh recovery.
 
 ---
 
@@ -1124,16 +1350,27 @@ other modules if contracts are respected.
   `extractMemoryFromPlan` (strict allow-list — never SQL).
 - All factory-injectable for tests.
 
-### A. Add result explanation (Phase 2E) — NEXT
-- New node after `execute`. Takes `ExecutionResult` + original
-  `QueryRequest`, produces a natural-language summary.
-- Keep it optional and behind a feature flag — not every caller wants
-  it.
-- Mirror the `createXxxNode({ mode, llm })` pattern (mock = no-op
-  passthrough; llm = LLM summary). Reuse `lib/llm.js` with role
-  `'explanation'` (add to `config/models.js`).
-- Output a new optional `state.explanation` field plus a controller
-  branch that surfaces it in the success envelope.
+### ~~A. Add frontend chat history API~~ — DONE
+- New provider: `apps/api/src/modules/chatHistory/chatHistoryProvider.js`.
+- New controller: `apps/api/src/controllers/chat.controller.js`.
+- Routes mounted under `/insights/chats` in `insight.routes.js`.
+- `/insights/query` now appends user/assistant turns when
+  `context.conversationId` exists, while preserving backward
+  compatibility when it does not.
+- Mongo collections: `chat_conversations`, `chat_messages`.
+- Dashboard helpers added in
+  `/Users/hardik/Projects/dashboard/client/dashboard/src/lib/api.js`.
+
+### ~~A. Add result explanation (Phase 2E)~~ — DONE
+- New node after `execute`: `apps/api/src/orchestrator/nodes/explain.node.js`.
+- Context builder: `apps/api/src/modules/explanation/explanationContext.js`.
+- Prompt: `prompts/explanation.prompt.md`.
+- Mode: `EXPLANATION_MODE=mock|llm`; mock is deterministic/no-LLM.
+- Output: optional `state.explanation`, surfaced as
+  `result.explanation` unless `context.responseMode === "table"`.
+- `context.responseMode === "insight"` returns explanation only.
+- Safety: context caps sample rows at 5 and never includes SQL,
+  credentials, tenant routing, or the full dataset.
 
 ### B. Vector ingestion pipeline (Phase 2F)
 - Today's vector store is read-only inside the request path. There
@@ -1195,34 +1432,42 @@ other modules if contracts are respected.
 16. `apps/api/src/modules/chatMemory/memoryExtractor.js` — pure
     `extractMemoryFromPlan`. Strict allow-list — never returns SQL
     or LLM prose.
-17. `apps/api/src/modules/semantic/semanticProvider.js` —
+17. `apps/api/src/modules/chatHistory/chatHistoryProvider.js` —
+    Mongo-or-in-memory full chat-history provider. Owns
+    `chat_conversations` + `chat_messages`, indexes, pagination, and
+    append-turn metadata updates for frontend rendering.
+18. `apps/api/src/controllers/chat.controller.js` — chat-history API
+    controller for create/list/get. Uses the same tenant/user scope as
+    query requests.
+19. `apps/api/src/modules/semantic/semanticProvider.js` —
     Mongo-or-in-memory catalog. `metricsToGlobalContext` is the
     pure projection used by the loader.
-18. `apps/api/src/modules/vector/vectorClient.js` —
+20. `apps/api/src/modules/vector/vectorClient.js` —
     Qdrant-via-undici-or-in-memory vector store; tenant-scoped
     cosine search.
-19. `apps/api/src/modules/vector/embeddingService.js` —
+21. `apps/api/src/modules/vector/embeddingService.js` —
     OpenAI-or-deterministic embedding service.
-20. `apps/api/src/modules/contracts/queryPlan.js` — Phase 2B widened
+22. `apps/api/src/modules/contracts/queryPlan.js` — Phase 2B widened
     contract with normalization + cross-validation. Read this before
     touching the planner output shape.
-21. `apps/api/src/modules/contracts/sqlDraft.js` — SQL output
+23. `apps/api/src/modules/contracts/sqlDraft.js` — SQL output
     contract; the SQL and correction nodes validate against this.
-22. `apps/api/src/lib/llm.js` — shared LLM facade
+24. `apps/api/src/lib/llm.js` — shared LLM facade
     (`getLlm(role).invokeJson(messages)`).
-23. `apps/api/src/orchestrator/graph.js` — `planRouter` and
+25. `apps/api/src/orchestrator/graph.js` — `planRouter` and
     `validationRouter` conditional edges; pattern to extend for
     further conditional flows.
-24. `apps/api/src/controllers/insight.controller.js` —
+26. `apps/api/src/controllers/insight.controller.js` —
     `buildResponseFromState` (clarification + execution +
     validation-failure envelopes), `httpStatusForState`, and the
-    fire-and-forget `writeMemoryDelta` Phase 2D hook.
-25. `apps/api/src/modules/validation/validator.js` — the deterministic
+    fire-and-forget `writeMemoryDelta` Phase 2D hook. Also owns the
+    chat-history append hook for `/insights/query`.
+27. `apps/api/src/modules/validation/validator.js` — the deterministic
     safety layer you must not bypass.
-26. `apps/api/src/modules/validation/rules/schema.rule.js` — how the
+28. `apps/api/src/modules/validation/rules/schema.rule.js` — how the
     SchemaContext is consumed by the validator.
-27. `schema/schema.sql` — the authoritative tenant schema.
-28. `docs/GATEWAY_INTEGRATION.md` — deployment context.
+29. `schema/schema.sql` — the authoritative tenant schema.
+30. `docs/GATEWAY_INTEGRATION.md` — deployment context.
 29. `prompts/planner.prompt.md` — active. The prompt for the LLM-backed
     planner with clarification rules.
 30. `prompts/sql.prompt.md` — active. The prompt for the LLM-backed

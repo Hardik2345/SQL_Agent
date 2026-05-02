@@ -11,6 +11,7 @@ import { sqlNode } from './nodes/sql.node.js';
 import { validateNode } from './nodes/validate.node.js';
 import { correctionNode } from './nodes/correction.node.js';
 import { executeNode } from './nodes/execute.node.js';
+import { explainNode } from './nodes/explain.node.js';
 
 /**
  * @typedef {import('../modules/contracts/agentState.js').AgentState} AgentState
@@ -42,6 +43,7 @@ builder.addNode(NODE.GENERATE_SQL, sqlNode);
 builder.addNode(NODE.VALIDATE, validateNode);
 builder.addNode(NODE.CORRECT, correctionNode);
 builder.addNode(NODE.EXECUTE, executeNode);
+builder.addNode(NODE.EXPLAIN_RESULT, explainNode);
 
 /**
  * Conditional router that runs after the planner. Terminal planner
@@ -102,7 +104,8 @@ builder.addConditionalEdges(NODE.VALIDATE, validationRouter, {
 // is what decides whether the next iteration executes, retries, or
 // gives up after MAX_CORRECTION_ATTEMPTS.
 builder.addEdge(NODE.CORRECT, NODE.VALIDATE);
-builder.addEdge(NODE.EXECUTE, END);
+builder.addEdge(NODE.EXECUTE, NODE.EXPLAIN_RESULT);
+builder.addEdge(NODE.EXPLAIN_RESULT, END);
 
 export const compiledGraph = builder.compile();
 

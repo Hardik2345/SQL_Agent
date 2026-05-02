@@ -8,6 +8,7 @@ import {
 } from '../utils/errors.js';
 import { createChatMemoryProvider } from '../modules/chatMemory/chatMemoryProvider.js';
 import { extractMemoryFromPlan } from '../modules/chatMemory/memoryExtractor.js';
+import { createChatHistoryProvider } from '../modules/chatHistory/chatHistoryProvider.js';
 import { logger } from '../utils/logger.js';
 
 /** @type {import('../modules/chatMemory/chatMemoryProvider.js').ChatMemoryProvider|null} */
@@ -15,6 +16,87 @@ let cachedMemoryProvider = null;
 const getMemoryProvider = async () => {
   if (!cachedMemoryProvider) cachedMemoryProvider = await createChatMemoryProvider();
   return cachedMemoryProvider;
+};
+
+/** @type {import('../modules/chatHistory/chatHistoryProvider.js').ChatHistoryProvider|null} */
+let cachedChatHistoryProvider = null;
+const getChatHistoryProvider = async () => {
+  if (!cachedChatHistoryProvider) cachedChatHistoryProvider = await createChatHistoryProvider();
+  return cachedChatHistoryProvider;
+};
+
+const requestUserId = (req, request) => {
+  const ctxUserId = request?.context?.userId;
+  return req.userId || (typeof ctxUserId === 'string' && ctxUserId.trim()) || 'anonymous';
+};
+
+const requestConversationId = (request) => {
+  const id = request?.context?.conversationId;
+  return typeof id === 'string' && id.trim() ? id.trim() : null;
+};
+
+const responseModeForState = (finalState) => {
+  const value = finalState?.request?.context?.responseMode;
+  return value === 'table' || value === 'insight' || value === 'both'
+    ? value
+    : 'both';
+};
+
+const assistantContentForResponse = (response) => {
+  if (response?.error) return response.error.message || 'The query failed.';
+  const result = response?.result;
+  if (!result) return 'No result.';
+  if (result.type === 'clarification_required') return result.question;
+  if (result.type === 'memory_ack') return result.message;
+  if (result.ok === true && result.stats) {
+    return `Returned ${result.stats.rowCount} row${result.stats.rowCount === 1 ? '' : 's'}.`;
+  }
+  if (result.ok === false && result.error) return result.error;
+  return 'Done.';
+};
+
+const assistantTypeForResponse = (response) => {
+  if (response?.error) return 'error';
+  const result = response?.result;
+  if (result?.type) return result.type;
+  if (result?.ok === true) return 'execution';
+  if (result?.ok === false) return 'error';
+  return undefined;
+};
+
+const persistChatTurn = async ({ req, request, response }) => {
+  const conversationId = requestConversationId(request);
+  if (!conversationId) return;
+  try {
+    const provider = await getChatHistoryProvider();
+    await provider.appendTurn({
+      brandId: req.brandId,
+      userId: requestUserId(req, request),
+      conversationId,
+      title: request.question,
+      userMessage: {
+        role: 'user',
+        content: request.question,
+        correlationId: req.correlationId,
+      },
+      assistantMessage: {
+        role: 'assistant',
+        content: assistantContentForResponse(response),
+        type: assistantTypeForResponse(response),
+        result: response?.result ?? response?.error ?? {},
+        correlationId: req.correlationId,
+      },
+    });
+  } catch (err) {
+    req.log?.warn(
+      {
+        event: 'controller.chat_history_write.failed',
+        correlationId: req.correlationId,
+        message: err instanceof Error ? err.message : String(err),
+      },
+      'chat history write failed (swallowed)',
+    );
+  }
 };
 
 /**
@@ -188,10 +270,27 @@ export const buildResponseFromState = (finalState, correlationId, log) => {
     };
   }
 
+  const responseMode = responseModeForState(finalState);
+  if (responseMode === 'insight') {
+    return {
+      ok: true,
+      correlationId,
+      result: {
+        ok: true,
+        explanation: finalState.explanation ?? null,
+      },
+    };
+  }
+
+  const result = { ...finalState.execution };
+  if (responseMode === 'both' && finalState.explanation) {
+    result.explanation = finalState.explanation;
+  }
+
   return {
     ok: true,
     correlationId,
-    result: finalState.execution,
+    result,
   };
 };
 
@@ -324,6 +423,7 @@ export const queryInsight = async (req, res) => {
       clearPendingClarification(finalState).catch(() => {});
     }
     const response = buildResponseFromState(finalState, correlationId, log);
+    await persistChatTurn({ req, request, response });
     // Fire-and-forget. Memory write failure must not affect the
     // response status or body.
     writeMemoryDelta(finalState).catch(() => {});
@@ -344,10 +444,24 @@ export const queryInsight = async (req, res) => {
       );
     }
 
-    return res.status(status).json({
+    const response = {
       ok: false,
       correlationId,
       error: { code: appErr.code, message: appErr.message, details: appErr.details },
-    });
+    };
+    if (request) await persistChatTurn({ req, request, response });
+    return res.status(status).json(response);
   }
+};
+
+export const _internal = {
+  assistantContentForResponse,
+  assistantTypeForResponse,
+  getChatHistoryProvider,
+  persistChatTurn,
+  responseModeForState,
+  resetForTests: () => {
+    cachedMemoryProvider = null;
+    cachedChatHistoryProvider = null;
+  },
 };

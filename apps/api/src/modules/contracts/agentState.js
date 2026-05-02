@@ -7,6 +7,7 @@ import { AGENT_STATUS } from '../../utils/constants.js';
  * @typedef {import('./sqlDraft.js').SqlDraft} SqlDraft
  * @typedef {import('./validationResult.js').ValidationResult} ValidationResult
  * @typedef {import('./executionResult.js').ExecutionResult} ExecutionResult
+ * @typedef {import('../explanation/explanation.types.js').InsightExplanation} InsightExplanation
  * @typedef {import('../tenant/tenant.types.js').TenantExecutionContext} TenantExecutionContext
  * @typedef {import('../schema/schema.types.js').SchemaContext} SchemaContext
  */
@@ -70,6 +71,7 @@ import { AGENT_STATUS } from '../../utils/constants.js';
  * @property {SqlDraft}                 [sqlDraft]           SQL draft produced by generator node.
  * @property {ValidationResult}         [validation]         Result from validator node.
  * @property {ExecutionResult}          [execution]          Result from executor node.
+ * @property {InsightExplanation}       [explanation]        Optional read-only explanation of execution truth.
  * @property {number}                   [correctionAttempts] How many times the correction node has run for this request.
  * @property {CorrectionHistoryEntry[]} [correctionHistory]  Per-attempt audit trail; never contains credentials.
  * @property {(typeof AGENT_STATUS)[keyof typeof AGENT_STATUS]} status   Coarse status for observability.
@@ -110,6 +112,7 @@ const schema = check.object({
   sqlDraft: check.object({}, { required: false }),
   validation: check.object({}, { required: false }),
   execution: check.object({}, { required: false }),
+  explanation: check.object({}, { required: false }),
   correctionAttempts: check.number({ required: false, integer: true, min: 0 }),
   correctionHistory: check.array(() => [], { required: false }),
   error: check.object(

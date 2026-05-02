@@ -15,7 +15,7 @@ export const TABLE_METADATA = Object.freeze({
     useFor:
       'product_id filters; order_id distinct counts; financial_status based cancellation/refund/paid-order metrics; created_at/created_date order windows.',
     avoid:
-      'Do not count rows as orders. Use COUNT(DISTINCT order_id) for order-level metrics because this table is line-item grain.',
+      'Do not count rows as orders. Use COUNT(DISTINCT order_id) for order-level metrics because this table is line-item grain. CRITICAL: This table does NOT have a sessions column — sessions data lives in hourly_product_sessions. For any metric requiring a sessions denominator (e.g. conversion_rate = orders / sessions), you MUST also include hourly_product_sessions in targetTables. Never fabricate COUNT(DISTINCT sessions) on this table.',
   },
   shopify_orders_update: {
     grain: 'updated order line item',

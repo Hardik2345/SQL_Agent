@@ -69,6 +69,15 @@ describe('insight.controller — buildResponseFromState (clarification path)', (
         rows: [{ date: '2025-01-01', gross_sales: 100 }],
         stats: { rowCount: 1, elapsedMs: 5, truncated: false },
       },
+      explanation: {
+        type: 'mixed',
+        headline: 'Sales by day',
+        summary: 'One sales row was returned.',
+        keyPoints: [],
+        caveats: [],
+        suggestedVisualization: { type: 'table' },
+        confidence: 1,
+      },
       status: 'executed',
     };
 
@@ -78,9 +87,68 @@ describe('insight.controller — buildResponseFromState (clarification path)', (
     assert.equal(result.ok, true);
     assert.equal(result.columns.length, 2);
     assert.equal(result.rows.length, 1);
+    assert.equal(result.explanation.headline, 'Sales by day');
     // Should NOT be the clarification shape.
     assert.equal(result.type, undefined);
     assert.equal(result.question, undefined);
+  });
+
+  it('responseMode="table" omits explanation while preserving rows', () => {
+    /** @type {any} */
+    const state = {
+      correlationId: 'c1',
+      request: { context: { responseMode: 'table' } },
+      plan: { status: 'ready' },
+      execution: {
+        ok: true,
+        columns: ['gross_sales'],
+        rows: [{ gross_sales: 100 }],
+        stats: { rowCount: 1, elapsedMs: 5, truncated: false },
+      },
+      explanation: {
+        type: 'text_insight',
+        headline: 'Gross sales',
+        summary: 'Gross sales were returned.',
+        keyPoints: [],
+        caveats: [],
+      },
+    };
+
+    const response = buildResponseFromState(state, 'c1');
+    const result = /** @type {any} */ (response.result);
+    assert.deepEqual(result.columns, ['gross_sales']);
+    assert.equal(result.rows.length, 1);
+    assert.equal(result.explanation, undefined);
+  });
+
+  it('responseMode="insight" returns explanation only', () => {
+    /** @type {any} */
+    const state = {
+      correlationId: 'c1',
+      request: { context: { responseMode: 'insight' } },
+      plan: { status: 'ready' },
+      execution: {
+        ok: true,
+        columns: ['gross_sales'],
+        rows: [{ gross_sales: 100 }],
+        stats: { rowCount: 1, elapsedMs: 5, truncated: false },
+      },
+      explanation: {
+        type: 'text_insight',
+        headline: 'Gross sales',
+        summary: 'Gross sales were returned.',
+        keyPoints: [],
+        caveats: [],
+      },
+    };
+
+    const response = buildResponseFromState(state, 'c1');
+    const result = /** @type {any} */ (response.result);
+    assert.equal(result.ok, true);
+    assert.equal(result.explanation.headline, 'Gross sales');
+    assert.equal(result.columns, undefined);
+    assert.equal(result.rows, undefined);
+    assert.equal(result.stats, undefined);
   });
 
   it('returns the memory acknowledgement envelope when plan.status === "memory_update"', () => {

@@ -13,6 +13,8 @@ import { assertContract, check } from '../../lib/runtimeValidators.js';
  * @property {string[]}                        columns    Column names in output order.
  * @property {Array<Record<string, unknown>>}  rows       Row records keyed by column name.
  * @property {ExecutionStats}                  stats      Execution statistics.
+ * @property {import('../explanation/explanation.types.js').InsightExplanation} [explanation]
+ *                                                       Optional read-only explanation attached by controller.
  * @property {string}                          [error]    Error message when ok is false.
  * @property {string}                          [errorCode] Stable error code when ok is false.
  */
@@ -28,6 +30,7 @@ const schema = check.object({
   columns: check.array(check.nonEmptyString()),
   rows: check.array(check.record(() => [])),
   stats: statsSchema,
+  explanation: check.object({}, { required: false }),
   error: check.string({ required: false }),
   errorCode: check.string({ required: false }),
 });

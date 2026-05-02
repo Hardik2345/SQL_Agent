@@ -26,6 +26,7 @@ export const stateChannels = Object.freeze({
   sqlDraft: { value: keepIfDefined },
   validation: { value: keepIfDefined },
   execution: { value: keepIfDefined },
+  explanation: { value: keepIfDefined },
   // Phase 2C: bounded correction loop. The correction node manages
   // its own accumulation (reads previous, writes the merged value),
   // so last-write-wins is sufficient.

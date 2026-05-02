@@ -7,13 +7,13 @@ import { env } from './env.js';
 export const models = Object.freeze({
   planner: Object.freeze({
     provider: 'openai',
-    model: env.llm.model,
+    model: env.llm.plannerModel,
     temperature: 0,
     maxTokens: 1024,
   }),
   sql: Object.freeze({
     provider: 'openai',
-    model: env.llm.model,
+    model: env.llm.sqlModel,
     // SQL generation must be deterministic — temperature 0 is non-
     // negotiable here. With higher temps the same plan can produce
     // different SELECTs across requests, which makes correction-loop
@@ -26,9 +26,15 @@ export const models = Object.freeze({
   }),
   correction: Object.freeze({
     provider: 'openai',
-    model: env.llm.model,
+    model: env.llm.correctionModel,
     temperature: 0,
     maxTokens: 1024,
+  }),
+  explanation: Object.freeze({
+    provider: 'openai',
+    model: env.llm.explanationModel,
+    temperature: 0,
+    maxTokens: 512,
   }),
 });
 

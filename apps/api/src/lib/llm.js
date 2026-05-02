@@ -2,14 +2,55 @@ import { env } from '../config/env.js';
 import { getModelConfig } from '../config/models.js';
 import { logger } from '../utils/logger.js';
 
+const OPENAI_RESPONSES_URL = 'https://api.openai.com/v1/responses';
+
+/**
+ * @param {ChatMessage[]} messages
+ */
+const toResponsesPayload = (messages) => {
+  const instructions = messages
+    .filter((message) => message.role === 'system')
+    .map((message) => message.content)
+    .join('\n\n')
+    .trim();
+
+  const input = messages
+    .filter((message) => message.role !== 'system')
+    .map((message) => ({
+      role: message.role,
+      content: [{ type: 'input_text', text: message.content }],
+    }));
+
+  return {
+    instructions: instructions || undefined,
+    input,
+  };
+};
+
+/**
+ * @param {any} payload
+ * @returns {string}
+ */
+const extractOutputText = (payload) => {
+  const chunks = [];
+  for (const item of payload?.output ?? []) {
+    if (item?.type !== 'message' || !Array.isArray(item.content)) continue;
+    for (const part of item.content) {
+      if (part?.type === 'output_text' && typeof part.text === 'string') {
+        chunks.push(part.text);
+      }
+    }
+  }
+  return chunks.join('').trim();
+};
+
 /**
  * LLM facade.
  *
  * `getLlm(role)` returns a thin client with a single method,
  * `invokeJson(messages)`. The client:
- *   - lazily imports `@langchain/openai` so the dep is only loaded when
- *     an LLM call actually happens (tests that inject their own
- *     factory never pay this cost),
+ *   - calls the OpenAI Responses API directly so the request path matches
+ *     the models and response format we validate via manual curl checks,
  *   - forces JSON-mode response so the planner / SQL generator get
  *     parseable output,
  *   - parses the response into a JS value, throwing a clear error if
@@ -29,7 +70,7 @@ import { logger } from '../utils/logger.js';
  */
 
 /**
- * @param {'planner'|'sql'|'correction'} role
+ * @param {'planner'|'sql'|'correction'|'explanation'} role
  * @returns {LlmClient}
  */
 export const getLlm = (role) => {
@@ -51,28 +92,49 @@ export const getLlm = (role) => {
         );
       }
 
-      // Lazy import — keeps test boot time low and avoids loading the
-      // langchain stack when only mock mode is in use.
-      const { ChatOpenAI } = await import('@langchain/openai');
-      const chat = new ChatOpenAI({
-        apiKey: env.llm.apiKey,
+      const requestBody = {
         model: config.model,
         temperature: config.temperature ?? 0,
-        maxTokens: config.maxTokens,
-        // Force OpenAI JSON mode so the model returns parseable JSON
-        // instead of prose. The system/user prompt still has to ask
-        // for JSON; this is belt-and-braces.
-        modelKwargs: { response_format: { type: 'json_object' } },
-      });
+        max_output_tokens: config.maxTokens,
+        text: { format: { type: 'json_object' } },
+        ...toResponsesPayload(messages),
+      };
 
       const started = Date.now();
-      const res = await chat.invoke(messages);
+      const res = await fetch(OPENAI_RESPONSES_URL, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${env.llm.apiKey}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(requestBody),
+      });
       const elapsedMs = Date.now() - started;
 
-      const content =
-        typeof res.content === 'string'
-          ? res.content
-          : JSON.stringify(res.content);
+      const payload = /** @type {any} */ (
+        await res.json().catch(async () => ({
+          error: {
+            message: await res.text().catch(() => 'Non-JSON HTTP response body'),
+          },
+        }))
+      );
+
+      if (!res.ok || payload?.error) {
+        const message = payload?.error?.message ?? `OpenAI request failed with status ${res.status}`;
+        logger.error(
+          {
+            event: 'llm.invoke.provider_error',
+            role,
+            model: config.model,
+            status: res.status,
+            providerError: payload?.error ?? payload,
+          },
+          'llm provider request failed',
+        );
+        throw new Error(`LLM provider error (role=${role}, model=${config.model}): ${message}`);
+      }
+
+      const content = extractOutputText(payload);
 
       logger.info(
         {
@@ -92,6 +154,7 @@ export const getLlm = (role) => {
           {
             event: 'llm.invoke.bad_json',
             role,
+            model: config.model,
             preview: content.slice(0, 200),
           },
           'llm returned non-JSON output despite JSON mode',

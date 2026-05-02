@@ -155,6 +155,18 @@ describe('validator', () => {
     assert.ok(codes(result).includes(VALIDATION_CODES.COLUMN_NOT_ALLOWED));
   });
 
+  it('rejects unqualified columns not present in referenced tables', () => {
+    // Regression: `session_id` may exist in other warehouse tables, but if the
+    // SQL references only `orders` and `orders` has no `session_id`, validation
+    // must fail before execution.
+    const result = validate({
+      sql: 'SELECT id, session_id FROM orders LIMIT 10',
+      schema,
+    });
+    assert.equal(result.valid, false);
+    assert.ok(codes(result).includes(VALIDATION_CODES.COLUMN_NOT_ALLOWED));
+  });
+
   it('flags GROUP BY violations', () => {
     const result = validate({
       sql: 'SELECT status, id FROM orders GROUP BY status LIMIT 10',
@@ -167,6 +179,32 @@ describe('validator', () => {
   it('accepts valid aggregate + GROUP BY', () => {
     const result = validate({
       sql: 'SELECT status, COUNT(*) AS n FROM orders GROUP BY status LIMIT 10',
+      schema,
+    });
+    assert.equal(result.valid, true, JSON.stringify(result.issues));
+  });
+
+  it('accepts ORDER BY using a select alias', () => {
+    const result = validate({
+      sql: 'SELECT status, COUNT(*) AS n FROM orders GROUP BY status ORDER BY n DESC LIMIT 10',
+      schema,
+    });
+    assert.equal(result.valid, true, JSON.stringify(result.issues));
+  });
+
+  it('accepts ORDER BY using a select alias inside a derived table', () => {
+    const result = validate({
+      sql: [
+        'SELECT ranked.status, ranked.n',
+        'FROM (',
+        '  SELECT status, COUNT(*) AS n',
+        '  FROM orders',
+        '  GROUP BY status',
+        '  ORDER BY n DESC',
+        '  LIMIT 5',
+        ') ranked',
+        'ORDER BY ranked.n DESC',
+      ].join(' '),
       schema,
     });
     assert.equal(result.valid, true, JSON.stringify(result.issues));

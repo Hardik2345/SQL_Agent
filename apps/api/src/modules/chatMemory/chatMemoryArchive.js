@@ -14,6 +14,7 @@ import { logger } from '../../utils/logger.js';
  * @property {(key: MemoryKey) => Promise<ChatContext|null>} getSnapshot
  * @property {(args: MemoryKey & { memory: Partial<ChatContext>, redisKey?: string }) => Promise<void>} upsertSnapshot
  * @property {(items: Array<MemoryKey & { memory: Partial<ChatContext>, redisKey?: string }>) => Promise<number>} upsertSnapshots
+ * @property {(key: MemoryKey) => Promise<void>} deleteSnapshot
  * @property {() => Promise<void>} clear
  */
 
@@ -208,6 +209,11 @@ export const createMongoChatMemoryArchive = async (cfg) => {
       });
       await c.bulkWrite(operations, { ordered: false });
       return operations.length;
+    },
+    deleteSnapshot: async ({ brandId, userId, conversationId }) => {
+      await ensureIndexes();
+      const c = await ensureConnected();
+      await c.deleteOne({ brandId, userId, conversationId });
     },
     clear: async () => {
       const c = await ensureConnected();

@@ -17,6 +17,7 @@ import { createChatMemoryKafkaProducer } from './chatMemoryKafkaProducer.js';
  * @typedef {Object} ChatMemoryProvider
  * @property {(key: MemoryKey) => Promise<ChatContext>}                    getChatContext
  * @property {(args: MemoryKey & { memoryDelta: Partial<ChatContext> }) => Promise<ChatContext>} updateChatContext
+ * @property {(key: MemoryKey) => Promise<void>}                            deleteChatContext
  * @property {() => Promise<void>}                                          clear
  * @property {boolean}                                                      mock
  */
@@ -132,6 +133,9 @@ const createInMemoryChatMemoryProvider = (cfg) => {
       const expiresAt = cfg.ttlSeconds > 0 ? now() + cfg.ttlSeconds * 1000 : 0;
       store.set(k, { value: next, expiresAt });
       return next;
+    },
+    deleteChatContext: async (key) => {
+      store.delete(keyFor(key));
     },
   };
 };
@@ -261,6 +265,17 @@ export const createRedisChatMemoryProvider = async (cfg) => {
         await cfg.kafkaProducer.publishChanged(key);
       }
       return next;
+    },
+    deleteChatContext: async (key) => {
+      await ensureConnected();
+      const redisKey = keyFor(key);
+      await client.del(redisKey);
+      if (cfg.archive?.deleteSnapshot) {
+        await cfg.archive.deleteSnapshot(key);
+      }
+      if (cfg.kafkaProducer) {
+        await cfg.kafkaProducer.publishChanged(key);
+      }
     },
   };
 };
